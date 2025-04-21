@@ -10,14 +10,14 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Set
-import yaml # type: ignore
+import yaml  # type: ignore
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger('spec-compiler')
+logger = logging.getLogger("spec-compiler")
+
 
 class NotebookSpecCompiler:
     """
@@ -25,7 +25,13 @@ class NotebookSpecCompiler:
     and generate environment specifications.
     """
 
-    def __init__(self, spec_file: str, output_dir: str = './output', verbose: bool = False, extract_imports: bool = False):
+    def __init__(
+        self,
+        spec_file: str,
+        output_dir: str = "./output",
+        verbose: bool = False,
+        extract_imports: bool = False,
+    ):
         """
         Initialize the NotebookSpecCompiler with a specification file and output directory.
 
@@ -118,7 +124,7 @@ class NotebookSpecCompiler:
             bool: True if loading was successful, False otherwise
         """
         try:
-            with open(self.spec_file, 'r') as f:
+            with open(self.spec_file, "r") as f:
                 self.spec = yaml.safe_load(f)
             logger.info(f"Successfully loaded spec from {self.spec_file}")
             return True
@@ -134,7 +140,7 @@ class NotebookSpecCompiler:
             bool: True if validation passed, False otherwise
         """
         # Check for required fields
-        required_fields = ['image_spec_header']
+        required_fields = ["image_spec_header"]
 
         for field in required_fields:
             if field not in self.spec:
@@ -142,31 +148,49 @@ class NotebookSpecCompiler:
                 return False
 
         # Extract header information
-        header = self.spec['image_spec_header']
+        header = self.spec["image_spec_header"]
 
         # Check for image name
-        self.image_name = next((item['image_name'] for item in header if 'image_name' in item), None)
+        self.image_name = next(
+            (item["image_name"] for item in header if "image_name" in item), None
+        )
         if not self.image_name:
             logger.error("Missing image_name in image_spec_header")
             return False
 
         # Check for notebook repository
-        self.nb_repo = next((item['nb_repo'] for item in header if 'nb_repo' in item), None)
+        self.nb_repo = next(
+            (item["nb_repo"] for item in header if "nb_repo" in item), None
+        )
         if not self.nb_repo:
             logger.error("Missing nb_repo in image_spec_header")
             return False
 
         # Get Python version
-        self.python_version = next((item['python_version'] for item in header if 'python_version' in item), None)
+        self.python_version = next(
+            (item["python_version"] for item in header if "python_version" in item),
+            None,
+        )
         if not self.python_version:
             logger.warning("No Python version specified, will use default")
 
         # Get root notebook directory
-        self.root_nb_directory = next((item['root_nb_directory'] for item in header if 'root_nb_directory' in item), "")
+        self.root_nb_directory = next(
+            (
+                item["root_nb_directory"]
+                for item in header
+                if "root_nb_directory" in item
+            ),
+            "",
+        )
 
         # Get validity dates
-        self.valid_on = next((item['valid_on'] for item in header if 'valid_on' in item), None)
-        self.expires_on = next((item['expires_on'] for item in header if 'expires_on' in item), None)
+        self.valid_on = next(
+            (item["valid_on"] for item in header if "valid_on" in item), None
+        )
+        self.expires_on = next(
+            (item["expires_on"] for item in header if "expires_on" in item), None
+        )
 
         logger.info(f"Spec validation passed for image: {self.image_name}")
         return True
@@ -191,7 +215,7 @@ class NotebookSpecCompiler:
                 ["git", "clone", self.nb_repo, self.repo_dir],
                 check=True,
                 capture_output=True,
-                text=True
+                text=True,
             )
             logger.info(f"Successfully cloned repository to {self.repo_dir}")
             return True
@@ -213,35 +237,43 @@ class NotebookSpecCompiler:
         self.notebook_paths = []
 
         # Process selected_notebooks section
-        if 'selected_notebooks' not in self.spec:
+        if "selected_notebooks" not in self.spec:
             logger.error("No selected_notebooks section in spec")
             return False
 
         repo_path = Path(self.repo_dir)
 
-        for entry in self.spec['selected_notebooks']:
-            if 'directories' in entry:
-                dirs_config = entry['directories']
+        for entry in self.spec["selected_notebooks"]:
+            if "directories" in entry:
+                dirs_config = entry["directories"]
 
                 # Get the root directory for this entry
-                entry_root = next((item['root_nb_directory'] for item in dirs_config
-                                  if 'root_nb_directory' in item), self.root_nb_directory)
+                entry_root = next(
+                    (
+                        item["root_nb_directory"]
+                        for item in dirs_config
+                        if "root_nb_directory" in item
+                    ),
+                    self.root_nb_directory,
+                )
 
                 # Get include and exclude directories
                 include_dirs = []
                 exclude_dirs = []
 
                 for item in dirs_config:
-                    if 'include_subdirs' in item:
-                        include_dirs.extend(item['include_subdirs'])
-                    if 'exclude_subdirs' in item:
-                        exclude_dirs.extend(item['exclude_subdirs'])
+                    if "include_subdirs" in item:
+                        include_dirs.extend(item["include_subdirs"])
+                    if "exclude_subdirs" in item:
+                        exclude_dirs.extend(item["exclude_subdirs"])
 
                 # Default to current directory if no includes specified
                 if not include_dirs:
-                    include_dirs = ['.']
+                    include_dirs = ["."]
 
-                logger.info(f"Processing directories: include={include_dirs}, exclude={exclude_dirs}")
+                logger.info(
+                    f"Processing directories: include={include_dirs}, exclude={exclude_dirs}"
+                )
 
                 # Process each include directory
                 for include_dir in include_dirs:
@@ -253,7 +285,7 @@ class NotebookSpecCompiler:
                         continue
 
                     # Find all notebooks in this directory and subdirectories
-                    for nb_path in dir_path.glob('**/*.ipynb'):
+                    for nb_path in dir_path.glob("**/*.ipynb"):
                         # Check if this notebook is in an excluded directory
                         is_excluded = False
                         for exclude_dir in exclude_dirs:
@@ -290,14 +322,16 @@ class NotebookSpecCompiler:
 
             # Regular expressions to match import statements
             # Matches both "import package" and "from package import something"
-            import_pattern = re.compile(r'^(?:import\s+([a-zA-Z0-9_\.]+))|(?:from\s+([a-zA-Z0-9_\.]+)\s+import)')
+            import_pattern = re.compile(
+                r"^(?:import\s+([a-zA-Z0-9_\.]+))|(?:from\s+([a-zA-Z0-9_\.]+)\s+import)"
+            )
 
             for nb_path in self.notebook_paths:
                 # Get notebook rootname
                 rootname = nb_path.stem
 
                 # Read the notebook
-                with open(nb_path, 'r', encoding='utf-8') as f:
+                with open(nb_path, "r", encoding="utf-8") as f:
                     try:
                         notebook = json.load(f)
                     except json.JSONDecodeError:
@@ -308,16 +342,16 @@ class NotebookSpecCompiler:
                 imports = set()
 
                 # Process each cell
-                for cell in notebook.get('cells', []):
-                    if cell.get('cell_type') == 'code':
+                for cell in notebook.get("cells", []):
+                    if cell.get("cell_type") == "code":
                         # Get the source code as a string
-                        if isinstance(cell.get('source'), list):
-                            source = ''.join(cell.get('source', []))
+                        if isinstance(cell.get("source"), list):
+                            source = "".join(cell.get("source", []))
                         else:
-                            source = cell.get('source', '')
+                            source = cell.get("source", "")
 
                         # Process each line
-                        for line in source.split('\n'):
+                        for line in source.split("\n"):
                             line = line.strip()
                             match = import_pattern.match(line)
                             if match:
@@ -326,26 +360,36 @@ class NotebookSpecCompiler:
                                 package_path = match.group(1) or match.group(2)
 
                                 # Extract the root package (first component before any dots)
-                                root_package = package_path.split('.')[0]
+                                root_package = package_path.split(".")[0]
 
                                 # Skip built-in modules and special imports
-                                if root_package not in ['__future__', 'builtins', 'sys', 'os']:
+                                if root_package not in [
+                                    "__future__",
+                                    "builtins",
+                                    "sys",
+                                    "os",
+                                ]:
                                     imports.add(root_package)
 
                 # Write imports to file
                 output_file = extract_dir / f"imports-{rootname}.pip"
-                with open(output_file, 'w') as f:
+                with open(output_file, "w") as f:
                     for package in sorted(imports):
                         f.write(f"{package}\n")
 
-                logger.debug(f"Extracted {len(imports)} imports from {rootname} to {output_file}")
+                logger.debug(
+                    f"Extracted {len(imports)} imports from {rootname} to {output_file}"
+                )
 
-            logger.info(f"Extracted imports from {len(self.notebook_paths)} notebooks to {extract_dir}")
+            logger.info(
+                f"Extracted imports from {len(self.notebook_paths)} notebooks to {extract_dir}"
+            )
             return True
 
         except Exception as e:
             logger.error(f"Error extracting imports from notebooks: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return False
 
@@ -367,7 +411,7 @@ class NotebookSpecCompiler:
         notebook_dirs = {nb_path.parent for nb_path in self.notebook_paths}
 
         for dir_path in notebook_dirs:
-            req_file = dir_path / 'requirements.txt'
+            req_file = dir_path / "requirements.txt"
             if req_file.exists():
                 self.requirements_files.append(req_file)
                 logger.debug(f"Found requirements file: {req_file}")
@@ -388,18 +432,20 @@ class NotebookSpecCompiler:
 
         for req_file in self.requirements_files:
             try:
-                with open(req_file, 'r') as f:
+                with open(req_file, "r") as f:
                     for line in f:
                         # Basic processing - could be enhanced with proper requirement parsing
                         line = line.strip()
-                        if line and not line.startswith('#'):
+                        if line and not line.startswith("#"):
                             self.package_list.add(line)
                             logger.debug(f"Added package requirement: {line}")
             except Exception as e:
                 logger.error(f"Error processing requirements file {req_file}: {e}")
                 return False
 
-        logger.info(f"Processed requirements into {len(self.package_list)} unique packages")
+        logger.info(
+            f"Processed requirements into {len(self.package_list)} unique packages"
+        )
         return True
 
     def generate_environment_specs(self) -> bool:
@@ -410,9 +456,11 @@ class NotebookSpecCompiler:
             bool: True if generation was successful, False otherwise
         """
         # Generate pip requirements file
-        pip_requirements = self.output_dir / f"{self.image_name.replace(' ', '_')}_requirements.txt"
+        pip_requirements = (
+            self.output_dir / f"{self.image_name.replace(' ', '_')}_requirements.txt"
+        )
         try:
-            with open(pip_requirements, 'w') as f:
+            with open(pip_requirements, "w") as f:
                 for package in sorted(self.package_list):
                     f.write(f"{package}\n")
             logger.info(f"Generated pip requirements file: {pip_requirements}")
@@ -421,9 +469,11 @@ class NotebookSpecCompiler:
             return False
 
         # Generate a simple conda environment YAML
-        conda_env = self.output_dir / f"{self.image_name.replace(' ', '_')}_environment.yml"
+        conda_env = (
+            self.output_dir / f"{self.image_name.replace(' ', '_')}_environment.yml"
+        )
         try:
-            with open(conda_env, 'w') as f:
+            with open(conda_env, "w") as f:
                 f.write(f"name: {self.image_name.replace(' ', '_').lower()}\n")
                 f.write("channels:\n")
                 f.write("  - conda-forge\n")
@@ -451,19 +501,29 @@ class NotebookSpecCompiler:
         Returns:
             bool: True if generation was successful, False otherwise
         """
-        notebook_list = self.output_dir / f"{self.image_name.replace(' ', '_')}_notebooks.txt"
+        notebook_list = (
+            self.output_dir / f"{self.image_name.replace(' ', '_')}_notebooks.txt"
+        )
         try:
-            with open(notebook_list, 'w') as f:
-                for nb_path in sorted(self.notebook_paths):
-                    # Get path relative to repo root
-                    rel_path = nb_path.relative_to(self.repo_dir)
-                    f.write(f"{rel_path}\n")
-            logger.info(f"Generated notebook list: {notebook_list}")
+            # Use a set to eliminate duplicates
+            unique_notebooks = set()
+
+            for nb_path in sorted(self.notebook_paths):
+                # Get path relative to repo root
+                rel_path = nb_path.relative_to(self.repo_dir)
+                unique_notebooks.add(str(rel_path))
+
+            with open(notebook_list, "w") as f:
+                for notebook in sorted(unique_notebooks):
+                    f.write(f"{notebook}\n")
+
+            logger.info(
+                f"Generated notebook list with {len(unique_notebooks)} unique entries: {notebook_list}"
+            )
+            return True
         except Exception as e:
             logger.error(f"Error generating notebook list: {e}")
             return False
-
-        return True
 
     def cleanup(self) -> None:
         """Clean up temporary files and directories."""
@@ -529,34 +589,31 @@ class NotebookSpecCompiler:
         finally:
             self.cleanup()
 
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Process notebook image specification YAML and prepare notebook environment'
+        description="Process notebook image specification YAML and prepare notebook environment"
     )
     parser.add_argument(
-        'spec_file',
+        "spec_file", type=str, help="Path to the YAML specification file"
+    )
+    parser.add_argument(
+        "--output-dir",
         type=str,
-        help='Path to the YAML specification file'
+        default="./output",
+        help="Directory to store output files",
     )
     parser.add_argument(
-        '--output-dir',
-        type=str,
-        default='./output',
-        help='Directory to store output files'
+        "--verbose", "-v", action="store_true", help="Enable verbose output"
     )
     parser.add_argument(
-        '--verbose',
-        '-v',
-        action='store_true',
-        help='Enable verbose output'
-    )
-    parser.add_argument(
-        '--extract-imports',
-        action='store_true',
-        help='Extract import statements from notebooks and save to separate files'
+        "--extract-imports",
+        action="store_true",
+        help="Extract import statements from notebooks and save to separate files",
     )
     return parser.parse_args()
+
 
 def main():
     args = parse_args()
@@ -566,11 +623,12 @@ def main():
         spec_file=args.spec_file,
         output_dir=args.output_dir,
         verbose=args.verbose,
-        extract_imports=args.extract_imports
+        extract_imports=args.extract_imports,
     )
 
     success = compiler.run()
     sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     main()
