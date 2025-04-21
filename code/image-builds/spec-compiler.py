@@ -531,64 +531,6 @@ class NotebookSpecCompiler:
             logger.info(f"Cleaning up repository directory: {self.repo_dir}")
             shutil.rmtree(self.repo_dir)
 
-    def run(self) -> bool:
-        """
-        Run the full compilation process.
-
-        Returns:
-            bool: True if compilation was successful, False otherwise
-        """
-        try:
-            # Load and validate the spec
-            if not self.load_spec() or not self.validate_spec():
-                logger.error("Specification loading or validation failed")
-                return False
-
-            # Clone the repository
-            if not self.clone_repository():
-                logger.error("Failed to clone repository")
-                return False
-
-            # Collect notebook paths
-            if not self.collect_notebook_paths():
-                logger.error("Failed to collect notebook paths")
-                return False
-
-            # Extract imports if requested
-            if self.extract_imports:
-                if not self.extract_notebook_imports():
-                    logger.error("Failed to extract imports from notebooks")
-                    return False
-
-            # Find requirements files
-            if not self.find_requirements_files():
-                logger.error("Failed to find requirements files")
-                return False
-
-            # Process requirements
-            if not self.process_requirements():
-                logger.error("Failed to process requirements")
-                return False
-
-            # Generate environment specifications
-            if not self.generate_environment_specs():
-                logger.error("Failed to generate environment specifications")
-                return False
-
-            # Generate notebook list
-            if not self.generate_notebook_list():
-                logger.error("Failed to generate notebook list")
-                return False
-
-            logger.info("Spec compilation completed successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Unexpected error during compilation: {e}")
-            return False
-        finally:
-            self.cleanup()
-
 
 def parse_args():
     """Parse command line arguments."""
