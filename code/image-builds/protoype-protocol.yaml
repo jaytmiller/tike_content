@@ -7,9 +7,8 @@ image_spec_header:
 - image_name: TIKE 2025.05
 
 - description: |
-  A block of text can be inserted here if desired,  optional.
-  Potentially this or another field could also be on the spawner page.
-- valid_on: 2025-05-12
+    A block of text can be inserted here if desired,  optional.
+    Potentially this or another field could also be on the spawner page.- valid_on: 2025-05-12
 - expires_on: 2025-12-31
 - nb_repo: https://github.com/spacetelescope/tike_content
 - root_nb_directory: content/notebooks/
