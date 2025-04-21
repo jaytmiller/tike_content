@@ -326,7 +326,12 @@ class NotebookSpecCompiler:
                 r"^(?:import\s+([a-zA-Z0-9_\.]+))|(?:from\s+([a-zA-Z0-9_\.]+)\s+import)"
             )
 
-            for nb_path in self.notebook_paths:
+            # Use a set to ensure each notebook is processed only once
+            unique_notebooks = set(str(nb_path) for nb_path in self.notebook_paths)
+            logger.info(f"Processing {len(unique_notebooks)} unique notebooks for import extraction")
+
+            for nb_path_str in unique_notebooks:
+                nb_path = Path(nb_path_str)
                 # Get notebook rootname
                 rootname = nb_path.stem
 
@@ -382,7 +387,7 @@ class NotebookSpecCompiler:
                 )
 
             logger.info(
-                f"Extracted imports from {len(self.notebook_paths)} notebooks to {extract_dir}"
+                f"Extracted imports from {len(unique_notebooks)} unique notebooks to {extract_dir}"
             )
             return True
 
@@ -392,7 +397,6 @@ class NotebookSpecCompiler:
 
             logger.error(traceback.format_exc())
             return False
-
     def find_requirements_files(self) -> bool:
         """
         Find requirements.txt files in the notebook directories.
