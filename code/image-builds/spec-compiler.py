@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
+#! env python
 
 import argparse
 import os
 import sys
-import yaml
 import subprocess
 import tempfile
 import logging
@@ -11,6 +10,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Set
+import yaml # type: ignore
 
 # Set up logging
 logging.basicConfig(
