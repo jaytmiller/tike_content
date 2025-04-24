@@ -112,6 +112,8 @@ class NotebookSpecCompiler:
 
         except Exception as e:
             logger.error(f"Unexpected error during compilation: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
         finally:
             self.cleanup()
@@ -140,7 +142,7 @@ class NotebookSpecCompiler:
             bool: True if validation passed, False otherwise
         """
         # Check for required fields
-        required_fields = ["image_spec_header"]
+        required_fields = ["image_spec_header", "selected_notebooks"]
 
         for field in required_fields:
             if field not in self.spec:
@@ -151,46 +153,28 @@ class NotebookSpecCompiler:
         header = self.spec["image_spec_header"]
 
         # Check for image name
-        self.image_name = next(
-            (item["image_name"] for item in header if "image_name" in item), None
-        )
+        self.image_name = header.get("image_name")
         if not self.image_name:
             logger.error("Missing image_name in image_spec_header")
             return False
 
         # Check for notebook repository
-        self.nb_repo = next(
-            (item["nb_repo"] for item in header if "nb_repo" in item), None
-        )
+        self.nb_repo = header.get("nb_repo")
         if not self.nb_repo:
             logger.error("Missing nb_repo in image_spec_header")
             return False
 
         # Get Python version
-        self.python_version = next(
-            (item["python_version"] for item in header if "python_version" in item),
-            None,
-        )
+        self.python_version = header.get("python_version")
         if not self.python_version:
             logger.warning("No Python version specified, will use default")
 
         # Get root notebook directory
-        self.root_nb_directory = next(
-            (
-                item["root_nb_directory"]
-                for item in header
-                if "root_nb_directory" in item
-            ),
-            "",
-        )
+        self.root_nb_directory = header.get("root_nb_directory", "")
 
         # Get validity dates
-        self.valid_on = next(
-            (item["valid_on"] for item in header if "valid_on" in item), None
-        )
-        self.expires_on = next(
-            (item["expires_on"] for item in header if "expires_on" in item), None
-        )
+        self.valid_on = header.get("valid_on")
+        self.expires_on = header.get("expires_on")
 
         logger.info(f"Spec validation passed for image: {self.image_name}")
         return True
@@ -248,28 +232,11 @@ class NotebookSpecCompiler:
                 dirs_config = entry["directories"]
 
                 # Get the root directory for this entry
-                entry_root = next(
-                    (
-                        item["root_nb_directory"]
-                        for item in dirs_config
-                        if "root_nb_directory" in item
-                    ),
-                    self.root_nb_directory,
-                )
+                entry_root = dirs_config.get("root_nb_directory", self.root_nb_directory)
 
                 # Get include and exclude directories
-                include_dirs = []
-                exclude_dirs = []
-
-                for item in dirs_config:
-                    if "include_subdirs" in item:
-                        include_dirs.extend(item["include_subdirs"])
-                    if "exclude_subdirs" in item:
-                        exclude_dirs.extend(item["exclude_subdirs"])
-
-                # Default to current directory if no includes specified
-                if not include_dirs:
-                    include_dirs = ["."]
+                include_dirs = dirs_config.get("include_subdirs", ["."])
+                exclude_dirs = dirs_config.get("exclude_subdirs", [])
 
                 logger.info(
                     f"Processing directories: include={include_dirs}, exclude={exclude_dirs}"
