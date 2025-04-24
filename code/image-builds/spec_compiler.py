@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Set
-import yaml  # type: ignore
+from ruamel.yaml import YAML  # Replace standard yaml with ruamel.yaml
 
 # Set up logging
 logging.basicConfig(
@@ -120,14 +120,17 @@ class NotebookSpecCompiler:
 
     def load_spec(self) -> bool:
         """
-        Load and validate the YAML specification file.
+        Load and validate the YAML specification file using ruamel.yaml to preserve order.
 
         Returns:
             bool: True if loading was successful, False otherwise
         """
         try:
+            yaml = YAML()  # Initialize ruamel.yaml
+            yaml.preserve_quotes = True  # Preserve quotes in the YAML
+            
             with open(self.spec_file, "r") as f:
-                self.spec = yaml.safe_load(f)
+                self.spec = yaml.load(f)
             logger.info(f"Successfully loaded spec from {self.spec_file}")
             return True
         except Exception as e:
@@ -444,20 +447,22 @@ class NotebookSpecCompiler:
             self.output_dir / f"{self.image_name.replace(' ', '_')}_environment.yml"
         )
         try:
+            yaml = YAML()
+            yaml.indent(mapping=2, sequence=4, offset=2)
+            
+            env_dict = {
+                'name': self.image_name.replace(' ', '_').lower(),
+                'channels': ['conda-forge', 'defaults'],
+                'dependencies': [
+                    f'python={self.python_version}' if self.python_version else 'python',
+                    'pip',
+                    {'pip': sorted(self.package_list)}
+                ]
+            }
+            
             with open(conda_env, "w") as f:
-                f.write(f"name: {self.image_name.replace(' ', '_').lower()}\n")
-                f.write("channels:\n")
-                f.write("  - conda-forge\n")
-                f.write("  - defaults\n")
-                f.write("dependencies:\n")
-                if self.python_version:
-                    f.write(f"  - python={self.python_version}\n")
-                else:
-                    f.write("  - python\n")
-                f.write("  - pip\n")
-                f.write("  - pip:\n")
-                for package in sorted(self.package_list):
-                    f.write(f"    - {package}\n")
+                yaml.dump(env_dict, f)
+                
             logger.info(f"Generated conda environment file: {conda_env}")
         except Exception as e:
             logger.error(f"Error generating conda environment file: {e}")
