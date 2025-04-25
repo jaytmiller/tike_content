@@ -7,9 +7,14 @@ import subprocess
 import tempfile
 import logging
 import shutil
+import traceback
+import re
+import json
+
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Set
+
 from ruamel.yaml import YAML  # Replace standard yaml with ruamel.yaml
 
 # Set up logging
@@ -112,7 +117,6 @@ class NotebookSpecCompiler:
 
         except Exception as e:
             logger.error(f"Unexpected error during compilation: {e}")
-            import traceback
             logger.error(traceback.format_exc())
             return False
         finally:
@@ -128,7 +132,7 @@ class NotebookSpecCompiler:
         try:
             yaml = YAML()  # Initialize ruamel.yaml
             yaml.preserve_quotes = True  # Preserve quotes in the YAML
-            
+
             with open(self.spec_file, "r") as f:
                 self.spec = yaml.load(f)
             logger.info(f"Successfully loaded spec from {self.spec_file}")
@@ -235,7 +239,9 @@ class NotebookSpecCompiler:
                 dirs_config = entry["directories"]
 
                 # Get the root directory for this entry
-                entry_root = dirs_config.get("root_nb_directory", self.root_nb_directory)
+                entry_root = dirs_config.get(
+                    "root_nb_directory", self.root_nb_directory
+                )
 
                 # Get include and exclude directories
                 include_dirs = dirs_config.get("include_subdirs", ["."])
@@ -287,9 +293,6 @@ class NotebookSpecCompiler:
         os.makedirs(extract_dir, exist_ok=True)
 
         try:
-            import json
-            import re
-
             # Regular expressions to match import statements
             # Matches both "import package" and "from package import something"
             import_pattern = re.compile(
@@ -298,7 +301,9 @@ class NotebookSpecCompiler:
 
             # Use a set to ensure each notebook is processed only once
             unique_notebooks = set(str(nb_path) for nb_path in self.notebook_paths)
-            logger.info(f"Processing {len(unique_notebooks)} unique notebooks for import extraction")
+            logger.info(
+                f"Processing {len(unique_notebooks)} unique notebooks for import extraction"
+            )
 
             for nb_path_str in unique_notebooks:
                 nb_path = Path(nb_path_str)
@@ -363,10 +368,9 @@ class NotebookSpecCompiler:
 
         except Exception as e:
             logger.error(f"Error extracting imports from notebooks: {e}")
-            import traceback
-
             logger.error(traceback.format_exc())
             return False
+
     def find_requirements_files(self) -> bool:
         """
         Find requirements.txt files in the notebook directories.
@@ -449,20 +453,24 @@ class NotebookSpecCompiler:
         try:
             yaml = YAML()
             yaml.indent(mapping=2, sequence=4, offset=2)
-            
+
             env_dict = {
-                'name': self.image_name.replace(' ', '_').lower(),
-                'channels': ['conda-forge', 'defaults'],
-                'dependencies': [
-                    f'python={self.python_version}' if self.python_version else 'python',
-                    'pip',
-                    {'pip': sorted(self.package_list)}
-                ]
+                "name": self.image_name.replace(" ", "_").lower(),
+                "channels": ["conda-forge", "defaults"],
+                "dependencies": [
+                    (
+                        f"python={self.python_version}"
+                        if self.python_version
+                        else "python"
+                    ),
+                    "pip",
+                    {"pip": sorted(self.package_list)},
+                ],
             }
-            
+
             with open(conda_env, "w") as f:
                 yaml.dump(env_dict, f)
-                
+
             logger.info(f"Generated conda environment file: {conda_env}")
         except Exception as e:
             logger.error(f"Error generating conda environment file: {e}")
