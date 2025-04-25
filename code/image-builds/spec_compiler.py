@@ -38,8 +38,8 @@ class NotebookSpecCompiler:
     """
 
     def __init__(
-        self, spec_file: str, output_dir: str, verbose: bool = False, extract_imports: bool = False,
-        debug: bool = False
+        self, spec_file: str, output_dir: str, repos_dir: str = None, verbose: bool = False, 
+        extract_imports: bool = False, debug: bool = False, cleanup: bool = False
     ):
         """
         Initialize the notebook spec compiler.
@@ -47,15 +47,20 @@ class NotebookSpecCompiler:
         Args:
             spec_file: Path to the YAML specification file
             output_dir: Directory to store output files
+            repos_dir: Directory to store cloned repositories (persistent)
             verbose: Enable verbose output
             extract_imports: Extract import statements from notebooks
             debug: Enable debugging with pdb on errors
+            cleanup: Whether to clean up repository clones after execution
         """
         self.spec_file = spec_file
         self.output_dir = Path(output_dir)
+        # Default to current working directory for repos if not specified
+        self.repos_dir = Path(repos_dir) if repos_dir else Path(os.getcwd()) / "notebook-repos"
         self.verbose = verbose
         self.extract_imports = extract_imports
         self.debug = debug
+        self.cleanup = cleanup
         
         # Initialize empty values
         self.spec = {}
@@ -67,16 +72,17 @@ class NotebookSpecCompiler:
         self.notebook_paths = []
         self.requirements_files = []
         self.package_list = set()
+        self.repos_to_setup = {}  # Will store repo_url -> path mappings
         
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
+        # Create repositories directory if it doesn't exist
+        os.makedirs(self.repos_dir, exist_ok=True)
     
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> bool:
         """
-        Log an error message and optionally drop into the debugger if debug mode is enabled.
-        
-        Args:
-            message: The error message to log
+        Log an error message and optionally drop into the debugger if debug mode
+        is enabled. return False indicating failure.
         """
         logger.error(message)
         if self.debug:
@@ -84,30 +90,19 @@ class NotebookSpecCompiler:
             pdb.set_trace()
         return False
 
-    def info(self, message: str) -> None:
+    def info(self, message: str) -> bool:
         """
-        Log an info message.
-        
-        Args:
-            message: The info message to log
-
-        Returns: True
+        Log an info message. return True indicating success.
         """
         logger.info(message)
         return True
     
-    def warning(self, message: str) -> None:
+    def warning(self, message: str) -> bool:
         """
-        Log an info message.
-        
-        Args:
-            message: The info message to log
-
-        Returns: True
+        Log a warning message. return True indicating success.
         """
         logger.warning(message)
         return True
-    
     
     def exception(self, e: Exception, message: str) -> bool:
         """
@@ -153,8 +148,8 @@ class NotebookSpecCompiler:
             if not self.validate_spec():
                 return False
         
-            # Clone the repository
-            if not self.clone_repositories():
+            # Clone or use local repositories
+            if not self.setup_repositories():
                 return False
         
             # Collect notebook paths
@@ -181,9 +176,12 @@ class NotebookSpecCompiler:
             if not self.process_imports():
                 return False
             
-            # Cleanup
-            if not self.cleanup():
-                return False
+            # Clean up if requested
+            if self.cleanup:
+                if not self.cleanup_repos():
+                    return False
+            else:
+                self.info("Skipping repository cleanup as --cleanup was not specified")
             
             return True
         except Exception as e:
@@ -196,7 +194,7 @@ class NotebookSpecCompiler:
     def _extract_imports_if_needed(self) -> bool:
         """Helper method to conditionally extract imports."""
         if not self.extract_imports:
-            return self.info("Notebook import extracxtion not requested.  use --extract-imports to request or specify packages in the spec file.")
+            return self.info("Notebook import extraction not requested. Use --extract-imports to request or specify packages in the spec file.")
         return self.extract_notebook_imports()
 
     def load_spec(self) -> bool:
@@ -337,7 +335,7 @@ class NotebookSpecCompiler:
             return self.error("No selected_notebooks section in spec")
         
         # Track all repositories that need to be cloned
-        self.repos_to_clone = {self.default_nb_repo: None}  # repo_url -> cloned_path
+        self.repos_to_setup = {self.default_nb_repo: None}  # repo_url -> path
         
         for entry in self.spec["selected_notebooks"]:
             # Check if this entry specifies a custom repository
@@ -346,53 +344,123 @@ class NotebookSpecCompiler:
                 return self.error(f"Missing repository for entry: {entry}")
             
             # Add to the list of repos to clone
-            self.repos_to_clone[nb_repo] = None
+            self.repos_to_setup[nb_repo] = None
         
         return True
 
-    def clone_repositories(self) -> bool:
+    def is_local_repo(self, repo_url: str) -> bool:
         """
-        Clone all repositories specified in the spec.
+        Check if a repository URL refers to a local directory.
+        
+        Args:
+            repo_url: The repository URL or path
+            
+        Returns:
+            bool: True if it's a local repository, False otherwise
+        """
+        return repo_url.startswith("file://")
+
+    def get_local_repo_path(self, repo_url: str) -> Path:
+        """
+        Get the path to a local repository.
+        
+        Args:
+            repo_url: The repository URL with file:// prefix
+            
+        Returns:
+            Path: The path to the local repository
+        """
+        # Remove the file:// prefix and expand user directory if needed
+        local_path = repo_url[7:]  # Remove "file://"
+        return Path(os.path.expanduser(local_path))
+
+    def setup_repositories(self) -> bool:
+        """
+        Set up all repositories specified in the spec - either clone remote repos
+        or use local directories.
 
         Returns:
-            bool: True if cloning was successful, False otherwise
+            bool: True if setup was successful, False otherwise
         """
-        if not hasattr(self, 'repos_to_clone') or not self.repos_to_clone:
-            return self.error("No repositories to clone")
+        if not hasattr(self, 'repos_to_setup') or not self.repos_to_setup:
+            return self.error("No repositories to set up")
 
-        # Create a temporary directory for the clones if it doesn't exist
-        self.repo_base_dir = tempfile.mkdtemp(prefix="notebook-repos-")
-        self.info(f"Using base directory for repositories: {self.repo_base_dir}")
-
-        self.info(f"Cloning repositories {self.repos_to_clone.keys()}")
+        self.info(f"Setting up repositories: {list(self.repos_to_setup.keys())}")
         
-        # Clone each repository
-        for repo_url in self.repos_to_clone:
-            # Create a unique directory name based on the repo URL
-            repo_name = repo_url.split('/')[-1].replace('.git', '')
-            repo_dir = os.path.join(self.repo_base_dir, repo_name)
+        # Process each repository
+        for repo_url in self.repos_to_setup:
+            if self.is_local_repo(repo_url):
+                # Handle local repository
+                local_path = self.get_local_repo_path(repo_url)
+                if not local_path.exists():
+                    return self.error(f"Local repository path does not exist: {local_path}")
+                
+                self.repos_to_setup[repo_url] = local_path
+                self.info(f"Using local repository at {local_path}")
+            else:
+                # Handle remote repository that needs to be cloned
+                repo_path = self._setup_remote_repo(repo_url)
+                if not repo_path:
+                    return False
+                
+                self.repos_to_setup[repo_url] = repo_path
+        
+        return True
+
+    def _setup_remote_repo(self, repo_url: str) -> Optional[Path]:
+        """
+        Set up a remote repository by cloning it or using an existing clone.
+        
+        Args:
+            repo_url: The repository URL
             
-            self.info(f"Cloning repository {repo_url} to {repo_dir}")
-            
+        Returns:
+            Optional[Path]: The path to the repository, or None if setup failed
+        """
+        # Create a unique directory name based on the repo URL
+        repo_name = repo_url.split('/')[-1].replace('.git', '')
+        repo_dir = self.repos_dir / repo_name
+        
+        # Check if the repository already exists
+        if repo_dir.exists():
+            # Repository already exists, try to update it
+            self.info(f"Repository already exists at {repo_dir}, attempting to update")
             try:
+                # Try to pull the latest changes
                 subprocess.run(
-                    ["git", "clone", repo_url, repo_dir],
+                    ["git", "-C", str(repo_dir), "pull"],
                     check=True,
                     capture_output=True,
                     text=True,
                 )
-                # Store the cloned path
-                self.repos_to_clone[repo_url] = repo_dir
-                self.info(f"Successfully cloned repository {repo_url} to {repo_dir}")
+                self.info(f"Successfully updated repository at {repo_dir}")
+                return repo_dir
             except subprocess.CalledProcessError as e:
-                return self.exception(e, f"Failed to clone repository {repo_url}: {e.stderr}")
+                self.warning(f"Failed to update repository at {repo_dir}: {e.stderr}")
+                self.warning("Will continue with existing repository version")
+                return repo_dir
+        else:
+            # Repository doesn't exist, clone it
+            self.info(f"Cloning repository {repo_url} to {repo_dir}")
+            try:
+                subprocess.run(
+                    ["git", "clone", "--single-branch", repo_url, str(repo_dir)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.info(f"Successfully cloned repository {repo_url} to {repo_dir}")
+                return repo_dir
+            except subprocess.CalledProcessError as e:
+                self.error(f"Failed to clone repository {repo_url}: {e.stderr}")
+                return None
 
-    def process_notebooks(self) -> bool:
+    def collect_notebook_paths(self) -> bool:
         """
-        Process all notebooks specified in the spec.
+        Collect paths to all notebooks specified in the spec.
         
         Returns:
-            bool: True if processing was successful, False otherwise
+            bool: True if collection was successful, False otherwise
         """
         self.notebook_paths = []
         
@@ -400,9 +468,10 @@ class NotebookSpecCompiler:
             # Get repository and directory information
             nb_repo = entry.get("nb_repo", self.default_nb_repo)
             
-            # Find the repository directory
-            repo_name = nb_repo.split('/')[-1].replace('.git', '')
-            repo_dir = Path(self.repo_base_dir) / repo_name
+            # Get the repository directory
+            repo_dir = self.repos_to_setup[nb_repo]
+            if not repo_dir:
+                return self.error(f"Repository not set up: {nb_repo}")
             
             # Get root notebook directory (default or override)
             root_nb_directory = entry.get("root_nb_directory", self.default_root_nb_directory)
@@ -421,18 +490,6 @@ class NotebookSpecCompiler:
             repo_dir: Path to the repository
             root_nb_directory: Root notebook directory within the repository
         """
-        # Get the repository override if specified
-        nb_repo = entry.get("nb_repo", self.default_nb_repo)
-        
-        # Use the correct repository directory based on the override
-        if nb_repo != self.default_nb_repo:
-            repo_name = nb_repo.split('/')[-1].replace('.git', '')
-            repo_dir = Path(self.repo_base_dir) / repo_name
-        
-        # Get the root_nb_directory override if specified
-        if "root_nb_directory" in entry:
-            root_nb_directory = entry["root_nb_directory"]
-        
         # Construct the base path for notebooks
         base_path = repo_dir
         if root_nb_directory:
@@ -557,6 +614,7 @@ class NotebookSpecCompiler:
             self.info(
                 f"Extracted imports from {len(unique_notebooks)} unique notebooks to {extract_dir}"
             )
+            return True
 
         except Exception as e:
             return self.exception(e, f"Error extracting imports from notebooks: {e}")
@@ -568,8 +626,8 @@ class NotebookSpecCompiler:
         Returns:
             bool: True if requirements files were found, False otherwise
         """
-        if not hasattr(self, 'repos_to_clone') or not self.repos_to_clone:
-            return self.error("Repositories not cloned, cannot find requirements files")
+        if not hasattr(self, 'repos_to_setup') or not self.repos_to_setup:
+            return self.error("Repositories not set up, cannot find requirements files")
 
         self.requirements_files = []
 
@@ -713,6 +771,28 @@ class NotebookSpecCompiler:
                 return True
         except Exception as e:
             return self.exception(e, f"Error during cleanup: {e}")
+
+    def generate_package_list(self) -> bool:
+        """
+        Generate a comprehensive package list from processed requirements files
+        and other sources.
+
+        Returns:
+            bool: True if generation was successful, False otherwise
+        """
+        try:
+            # If we don't have any packages yet, warn but continue
+            if not self.package_list:
+                self.warning("No packages found in requirements files")
+            
+            # Generate environment specifications using the package list
+            if not self.generate_environment_specs():
+                return False
+            
+            self.info(f"Generated package list with {len(self.package_list)} packages")
+            return True
+        except Exception as e:
+            return self.exception(e, f"Error generating package list: {e}")
 
 def parse_args():
     """Parse command line arguments."""

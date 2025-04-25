@@ -12,7 +12,9 @@ image_spec_header:
   nb_repo: https://github.com/spacetelescope/tike_content
   root_nb_directory: content/notebooks/
 
-# Selected notebooks configuration
+# Selected notebooks configuration,  each list item is a set of
+# requirments related to one repo which may be defaulted to one
+# specified in the image spec header.
 selected_notebooks:
   - include_subdirs:
       - data-access/

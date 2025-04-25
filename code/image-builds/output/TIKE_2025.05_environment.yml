@@ -5,4 +5,33 @@ channels:
 dependencies:
   - python=3.12.9
   - pip
-  - pip: []
+  - pip:
+      - Requests >= 2.31.0
+      - astrocut >= 0.12.0
+      - astropy >= 5.3.3
+      - astroquery >= 0.4.6
+      - astroquery==0.4.6
+      - astroquery>=0.4.6
+      - bokeh>=3.0.2
+      - ipython >= 8.12.0
+      - ipywidgets >= 8.1.0
+      - lightkurve >= 2.4.2
+      - lightkurve >= 2.5.0
+      - matplotlib >= 3.6.0
+      - matplotlib >= 3.6.2
+      - matplotlib >= 3.7.1
+      - matplotlib >= 3.7.2
+      - matplotlib==3.6.0
+      - matplotlib>=3.6.2
+      - numpy < 2.0.0
+      - numpy >= 1.23.4
+      - numpy >= 1.23.5
+      - numpy >= 1.24.2
+      - numpy >= 1.24.3
+      - numpy >= 1.25.0
+      - numpy==1.23.4
+      - numpy>=1.23.5
+      - pandas >= 2.0.2
+      - pyvo >= 1.4.1
+      - reproject >= 0.11.0
+      - requests >= 2.31.0
