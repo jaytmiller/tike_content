@@ -8,9 +8,9 @@ image_spec_header:
     Potentially this or another field could also be on the spawner page.
   valid_on: 2025-05-12
   expires_on: 2025-12-31
+  python_version: 3.12.9
   nb_repo: https://github.com/spacetelescope/tike_content
   root_nb_directory: content/notebooks/
-  python_version: 3.12.9
 
 # Selected notebooks configuration
 selected_notebooks:
@@ -22,13 +22,12 @@ selected_notebooks:
         - zooniverse_view_lightcurve/
 
   - directories:
-      root_nb_directory: content/notebooks/
+      nb_repo: https://github.com/spacetelescope/mast_notebooks
+      root_nb_directory: notebooks/tess
       include_subdirs:
         - .
       exclude_subdirs:
-        - aas-245/
-        - tesscut-in-the-cloud/
-        - webinar-series/
+        - removing_scattered_light_using_regression
 
 # ---
 # It will be understood that directories are recursively included

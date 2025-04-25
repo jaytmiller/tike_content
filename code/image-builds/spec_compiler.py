@@ -31,96 +31,91 @@ class NotebookSpecCompiler:
     """
 
     def __init__(
-        self,
-        spec_file: str,
-        output_dir: str = "./output",
-        verbose: bool = False,
-        extract_imports: bool = False,
+        self, spec_file: str, output_dir: str, verbose: bool = False, extract_imports: bool = False
     ):
         """
-        Initialize the NotebookSpecCompiler with a specification file and output directory.
+        Initialize the notebook spec compiler.
 
         Args:
             spec_file: Path to the YAML specification file
             output_dir: Directory to store output files
-            verbose: Enable verbose logging
+            verbose: Enable verbose output
             extract_imports: Extract import statements from notebooks
         """
         self.spec_file = spec_file
         self.output_dir = Path(output_dir)
+        self.verbose = verbose
         self.extract_imports = extract_imports
-
-        if verbose:
-            logger.setLevel(logging.DEBUG)
-
-        # Initialize state variables
-        self.spec: Dict[str, Any] = {}
-        self.repo_dir: Optional[str] = None
-        self.notebook_paths: List[Path] = []
-        self.requirements_files: List[Path] = []
-        self.package_list: Set[str] = set()
-
-        # Create output directory
+        
+        # Initialize empty values
+        self.spec = {}
+        self.image_name = ""
+        self.default_nb_repo = ""
+        self.default_root_nb_directory = ""
+        self.python_version = ""
+        self.repo_dir = None
+        self.notebook_paths = []
+        self.requirements_files = []
+        self.package_list = set()
+        
+        # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self) -> bool:
         """
-        Run the full compilation process.
-
+        Run the compiler.
+        
         Returns:
             bool: True if compilation was successful, False otherwise
         """
         try:
-            # Load and validate the spec
-            if not self.load_spec() or not self.validate_spec():
-                logger.error("Specification loading or validation failed")
+            # Load the spec file
+            if not self.load_spec():
                 return False
-
-            # Clone the repository
-            if not self.clone_repository():
-                logger.error("Failed to clone repository")
-                return False
-
-            # Collect notebook paths
+            
+            # Collect notebook paths (now includes repository cloning)
             if not self.collect_notebook_paths():
-                logger.error("Failed to collect notebook paths")
                 return False
-
-            # Extract imports if requested
-            if self.extract_imports:
-                if not self.extract_notebook_imports():
-                    logger.error("Failed to extract imports from notebooks")
-                    return False
-
+            
             # Find requirements files
             if not self.find_requirements_files():
-                logger.error("Failed to find requirements files")
                 return False
-
+            
             # Process requirements
             if not self.process_requirements():
-                logger.error("Failed to process requirements")
                 return False
-
-            # Generate environment specifications
-            if not self.generate_environment_specs():
-                logger.error("Failed to generate environment specifications")
+            
+            # Generate package list
+            if not self.generate_package_list():
                 return False
-
+            
             # Generate notebook list
             if not self.generate_notebook_list():
-                logger.error("Failed to generate notebook list")
                 return False
-
-            logger.info("Spec compilation completed successfully")
+            
+            # Extract imports if requested
+            if not self.process_imports():
+                return False
+            
+            # Cleanup
+            if not self.cleanup():
+                return False
+            
             return True
-
         except Exception as e:
-            logger.error(f"Unexpected error during compilation: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error running compiler: {e}")
             return False
-        finally:
-            self.cleanup()
+        
+    def _load_and_validate(self) -> bool:
+        """Helper method to load and validate the spec."""
+        return self.load_spec() and self.validate_spec()
+    
+    def _extract_imports_if_needed(self) -> bool:
+        """Helper method to conditionally extract imports."""
+        if not self.extract_imports:
+            logger.info("Notebook import extracxtion not requested.  use --extract-imports to request or specify packages in the spec file.")
+            return True
+        return self.extract_notebook_imports()
 
     def load_spec(self) -> bool:
         """
@@ -221,10 +216,6 @@ class NotebookSpecCompiler:
         Returns:
             bool: True if collection was successful, False otherwise
         """
-        if not self.repo_dir:
-            logger.error("Repository not cloned, cannot collect notebook paths")
-            return False
-
         self.notebook_paths = []
 
         # Process selected_notebooks section
@@ -233,49 +224,51 @@ class NotebookSpecCompiler:
             return False
 
         repo_path = Path(self.repo_dir)
-
+        
         for entry in self.spec["selected_notebooks"]:
             if "directories" in entry:
-                dirs_config = entry["directories"]
-
-                # Get the root directory for this entry
-                entry_root = dirs_config.get(
-                    "root_nb_directory", self.root_nb_directory
-                )
-
-                # Get include and exclude directories
-                include_dirs = dirs_config.get("include_subdirs", ["."])
-                exclude_dirs = dirs_config.get("exclude_subdirs", [])
-
-                logger.info(
-                    f"Processing directories: include={include_dirs}, exclude={exclude_dirs}"
-                )
-
-                # Process each include directory
-                for include_dir in include_dirs:
-                    # Construct the full path
-                    dir_path = repo_path / entry_root / include_dir
-
-                    if not dir_path.exists():
-                        logger.warning(f"Directory does not exist: {dir_path}")
-                        continue
-
-                    # Find all notebooks in this directory and subdirectories
-                    for nb_path in dir_path.glob("**/*.ipynb"):
-                        # Check if this notebook is in an excluded directory
-                        is_excluded = False
-                        for exclude_dir in exclude_dirs:
-                            exclude_path = repo_path / entry_root / exclude_dir
-                            if str(nb_path).startswith(str(exclude_path)):
-                                is_excluded = True
-                                break
-
-                        if not is_excluded:
-                            self.notebook_paths.append(nb_path)
-                            logger.debug(f"Added notebook: {nb_path}")
-
+                self._process_directory_entry(entry, repo_path)
+        
         logger.info(f"Collected {len(self.notebook_paths)} notebooks")
         return True
+
+    def _process_directory_entry(self, entry: dict, repo_dir: Path, root_nb_directory: str) -> None:
+        """
+        Process a directory entry from the spec file.
+        
+        Args:
+            entry: The directory entry from the spec
+            repo_dir: Path to the repository
+            root_nb_directory: Root notebook directory within the repository
+        """
+        directories = entry["directories"]
+        
+        # Construct the base path for notebooks
+        base_path = repo_dir
+        if root_nb_directory:
+            base_path = base_path / root_nb_directory
+        
+        # Process include_subdirs
+        include_subdirs = directories.get("include_subdirs", ["."])
+        for subdir in include_subdirs:
+            subdir_path = base_path / subdir
+            if not subdir_path.exists():
+                logger.warning(f"Included directory does not exist: {subdir_path}")
+                continue
+        
+            # Find all notebooks in this directory
+            for nb_path in subdir_path.glob("**/*.ipynb"):
+                # Check if the notebook is in an excluded directory
+                exclude_subdirs = directories.get("exclude_subdirs", [])
+                excluded = False
+                for exclude in exclude_subdirs:
+                    exclude_path = base_path / exclude
+                    if str(nb_path).startswith(str(exclude_path)):
+                        excluded = True
+                        break
+            
+                if not excluded:
+                    self.notebook_paths.append(nb_path)
 
     def extract_notebook_imports(self) -> bool:
         """

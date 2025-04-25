@@ -1,0 +1,4 @@
+content/notebooks/data-access/data-access.ipynb
+content/notebooks/lcviz-tutorial/lcviz_tutorial.ipynb
+content/notebooks/tglc/tglc.ipynb
+content/notebooks/zooniverse_view_lightcurve/zooniverse_view_lightcurve.ipynb
