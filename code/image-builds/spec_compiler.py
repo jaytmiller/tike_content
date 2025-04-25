@@ -1,5 +1,11 @@
 #! env python
 
+"""
+Coding notes:
+For the sake of brevity,  we assume self.info and self.warning return True, 
+and self.error and self.exception return False, and self.debug returns None.
+"""
+
 import argparse
 import os
 import sys
@@ -76,6 +82,7 @@ class NotebookSpecCompiler:
         if self.debug:
             print(f"\n*** DEBUG MODE: Dropping into debugger due to error: {message} ***")
             pdb.set_trace()
+        return False
 
     def info(self, message: str) -> None:
         """
@@ -83,11 +90,24 @@ class NotebookSpecCompiler:
         
         Args:
             message: The info message to log
-            
+
         Returns: True
         """
         logger.info(message)
         return True
+    
+    def warning(self, message: str) -> None:
+        """
+        Log an info message.
+        
+        Args:
+            message: The info message to log
+
+        Returns: True
+        """
+        logger.warning(message)
+        return True
+    
     
     def exception(self, e: Exception, message: str) -> bool:
         """
@@ -134,7 +154,7 @@ class NotebookSpecCompiler:
                 return False
         
             # Clone the repository
-            if not self.clone_repository():
+            if not self.clone_repositories():
                 return False
         
             # Collect notebook paths
@@ -176,8 +196,7 @@ class NotebookSpecCompiler:
     def _extract_imports_if_needed(self) -> bool:
         """Helper method to conditionally extract imports."""
         if not self.extract_imports:
-            logger.info("Notebook import extracxtion not requested.  use --extract-imports to request or specify packages in the spec file.")
-            return True
+            return self.info("Notebook import extracxtion not requested.  use --extract-imports to request or specify packages in the spec file.")
         return self.extract_notebook_imports()
 
     def load_spec(self) -> bool:
@@ -190,11 +209,9 @@ class NotebookSpecCompiler:
         try:
             yaml = YAML()  # Initialize ruamel.yaml
             yaml.preserve_quotes = True  # Preserve quotes in the YAML
-
             with open(self.spec_file, "r") as f:
                 self.spec = yaml.load(f)
-            logger.info(f"Successfully loaded spec from {self.spec_file}")
-            return True
+            return self.info(f"Successfully loaded spec from {self.spec_file}")
         except Exception as e:
             return self.exception(e, f"Failed to load YAML spec: {e}")
 
@@ -205,47 +222,74 @@ class NotebookSpecCompiler:
         Returns:
             bool: True if validation passed, False otherwise
         """
+        # Define allowed keywords based on prototype-protocol.yaml
+        allowed_top_level_keywords = {"image_spec_header", "selected_notebooks"}
+        allowed_header_keywords = {
+            "image_name", "description", "valid_on", "expires_on", 
+            "python_version", "nb_repo", "root_nb_directory"
+        }
+        allowed_selected_notebooks_keywords = {"directories"}
+        allowed_directories_keywords = {
+            "include_subdirs", "exclude_subdirs", "nb_repo", "root_nb_directory"
+        }
+
         # Check for required fields
         required_fields = ["image_spec_header", "selected_notebooks"]
 
         for field in required_fields:
             if field not in self.spec:
-                self.error(f"Missing required field: {field}")
-                return False
+                return self.error(f"Missing required field: {field}")
+
+        # Check for unknown top-level keywords
+        for key in self.spec:
+            if key not in allowed_top_level_keywords:
+                return self.error(f"Unknown top-level keyword: {key}")
 
         # Extract header information
         header = self.spec["image_spec_header"]
 
-        # Check for image name
-        self.image_name = header.get("image_name")
-        if not self.image_name:
-            self.error("Missing image_name in image_spec_header")
-            return False
+        # Check for unknown header keywords
+        for key in header:
+            if key not in allowed_header_keywords:
+                return self.error(f"Unknown keyword in image_spec_header: {key}")
 
-        # Check for default notebook repository
-        self.default_nb_repo = header.get("nb_repo")
-        if not self.default_nb_repo:
-            self.error("Missing nb_repo in image_spec_header")
-            return False
+        # Check for required header fields
+        required_header_fields = ["image_name", "python_version", "valid_on", "expires_on", "nb_repo"]
+        for field in required_header_fields:
+            if field not in header:
+                return self.error(f"Missing required field in image_spec_header: {field}")
 
-        # Get Python version
-        self.python_version = header.get("python_version")
-        if not self.python_version:
-            logger.warning("No Python version specified, will use default")
+        # Extract header values
+        self.image_name = header["image_name"]
+        self.python_version = header["python_version"]
+        self.valid_on = header["valid_on"]
+        self.expires_on = header["expires_on"]
+        self.default_nb_repo = header["nb_repo"]
 
         # Get default root notebook directory
         self.default_root_nb_directory = header.get("root_nb_directory", "")
 
-        # Get validity dates
-        self.valid_on = header.get("valid_on")
-        self.expires_on = header.get("expires_on")
+        # Validate selected_notebooks section
+        if "selected_notebooks" in self.spec:
+            for entry in self.spec["selected_notebooks"]:
+                # Check for unknown keywords in selected_notebooks entries
+                for key in entry:
+                    if key not in allowed_selected_notebooks_keywords:
+                        return self.error(f"Unknown keyword in selected_notebooks entry: {key}")
+            
+                # Check directories section if present
+                if "directories" in entry:
+                    directories = entry["directories"]
+                    for key in directories:
+                        if key not in allowed_directories_keywords:
+                            return self.error(f"Unknown keyword in directories section: {key}")
 
         # Validate that all repositories in directory entries are specified
+        # Each 'directories' block in selected_notebooks can specify its own repository
         if not self._validate_directory_repos():
             return False
 
-        logger.info(f"Spec validation passed for image: {self.image_name}")
-        return True
+        return self.info(f"Spec validation passed for image: {self.image_name}")
 
     def _validate_directory_repos(self) -> bool:
         """
@@ -255,8 +299,7 @@ class NotebookSpecCompiler:
             bool: True if validation passed, False otherwise
         """
         if "selected_notebooks" not in self.spec:
-            self.error("No selected_notebooks section in spec")
-            return False
+            return self.error("No selected_notebooks section in spec")
         
         # Track all repositories that need to be cloned
         self.repos_to_clone = {self.default_nb_repo: None}  # repo_url -> cloned_path
@@ -266,15 +309,14 @@ class NotebookSpecCompiler:
                 # Check if this entry specifies a custom repository
                 nb_repo = entry.get("nb_repo", self.default_nb_repo)
                 if not nb_repo:
-                    self.error(f"Missing repository for directory entry: {entry}")
-                    return False
+                    return self.error(f"Missing repository for directory entry: {entry}")
                 
                 # Add to the list of repos to clone
                 self.repos_to_clone[nb_repo] = None
         
         return True
 
-    def clone_repository(self) -> bool:
+    def clone_repositories(self) -> bool:
         """
         Clone all repositories specified in the spec.
 
@@ -282,12 +324,13 @@ class NotebookSpecCompiler:
             bool: True if cloning was successful, False otherwise
         """
         if not hasattr(self, 'repos_to_clone') or not self.repos_to_clone:
-            self.error("No repositories to clone")
-            return False
+            return self.error("No repositories to clone")
 
         # Create a temporary directory for the clones if it doesn't exist
         self.repo_base_dir = tempfile.mkdtemp(prefix="notebook-repos-")
-        logger.info(f"Using base directory for repositories: {self.repo_base_dir}")
+        self.info(f"Using base directory for repositories: {self.repo_base_dir}")
+
+        self.info(f"Cloning repositories {self.repos_to_clone.keys()}")
         
         # Clone each repository
         for repo_url in self.repos_to_clone:
@@ -295,7 +338,7 @@ class NotebookSpecCompiler:
             repo_name = repo_url.split('/')[-1].replace('.git', '')
             repo_dir = os.path.join(self.repo_base_dir, repo_name)
             
-            logger.info(f"Cloning repository {repo_url} to {repo_dir}")
+            self.info(f"Cloning repository {repo_url} to {repo_dir}")
             
             try:
                 subprocess.run(
@@ -306,11 +349,9 @@ class NotebookSpecCompiler:
                 )
                 # Store the cloned path
                 self.repos_to_clone[repo_url] = repo_dir
-                logger.info(f"Successfully cloned repository {repo_url} to {repo_dir}")
+                self.info(f"Successfully cloned repository {repo_url} to {repo_dir}")
             except subprocess.CalledProcessError as e:
                 return self.exception(e, f"Failed to clone repository {repo_url}: {e.stderr}")
-        
-        return True
 
     def collect_notebook_paths(self) -> bool:
         """
@@ -323,8 +364,7 @@ class NotebookSpecCompiler:
 
         # Process selected_notebooks section
         if "selected_notebooks" not in self.spec:
-            self.error("No selected_notebooks section in spec")
-            return False
+            return self.error("No selected_notebooks section in spec")
 
         for entry in self.spec["selected_notebooks"]:
             if "directories" in entry:
@@ -335,14 +375,12 @@ class NotebookSpecCompiler:
                 # Get the cloned repo path
                 repo_dir = self.repos_to_clone.get(nb_repo)
                 if not repo_dir:
-                    self.error(f"Repository not found or not cloned: {nb_repo}")
-                    return False
+                    return self.error(f"Repository not found or not cloned: {nb_repo}")
                 
                 # Process the directory entry
                 self._process_directory_entry(entry, Path(repo_dir), root_nb_directory)
         
-        logger.info(f"Collected {len(self.notebook_paths)} notebooks")
-        return True
+        return self.info(f"Collected {len(self.notebook_paths)} notebooks")
 
     def _process_directory_entry(self, entry: dict, repo_dir: Path, root_nb_directory: str) -> None:
         """
@@ -390,8 +428,7 @@ class NotebookSpecCompiler:
             bool: True if processing was successful, False otherwise
         """
         if not self.extract_imports:
-            logger.info("Notebook import extraction not requested. Use --extract-imports to request or specify packages in the spec file.")
-            return True
+            return self.info("Notebook import extraction not requested. Use --extract-imports to request or specify packages in the spec file.")
         return self.extract_notebook_imports()
 
     def extract_notebook_imports(self) -> bool:
@@ -402,8 +439,7 @@ class NotebookSpecCompiler:
             bool: True if extraction was successful, False otherwise
         """
         if not self.notebook_paths:
-            logger.warning("No notebooks found to extract imports from")
-            return True
+            return logger.warning("No notebooks found to extract imports from")
 
         # Create the extraction directory
         extract_dir = self.output_dir / "extracted"
@@ -418,7 +454,7 @@ class NotebookSpecCompiler:
 
             # Use a set to ensure each notebook is processed only once
             unique_notebooks = set(str(nb_path) for nb_path in self.notebook_paths)
-            logger.info(
+            self.info(
                 f"Processing {len(unique_notebooks)} unique notebooks for import extraction"
             )
 
@@ -478,14 +514,11 @@ class NotebookSpecCompiler:
                     f"Extracted {len(imports)} imports from {rootname} to {output_file}"
                 )
 
-            logger.info(
+            self.info(
                 f"Extracted imports from {len(unique_notebooks)} unique notebooks to {extract_dir}"
             )
-            return True
 
         except Exception as e:
-            # Log the traceback separately since it's useful information
-            logger.error(traceback.format_exc())
             return self.exception(e, f"Error extracting imports from notebooks: {e}")
 
     def find_requirements_files(self) -> bool:
@@ -495,12 +528,10 @@ class NotebookSpecCompiler:
         Returns:
             bool: True if requirements files were found, False otherwise
         """
-        if not self.repo_dir:
-            self.error("Repository not cloned, cannot find requirements files")
-            return False
+        if not hasattr(self, 'repos_to_clone') or not self.repos_to_clone:
+            return self.error("Repositories not cloned, cannot find requirements files")
 
         self.requirements_files = []
-        repo_path = Path(self.repo_dir)
 
         # Look for requirements.txt in the same directories as notebooks
         notebook_dirs = {nb_path.parent for nb_path in self.notebook_paths}
@@ -511,8 +542,7 @@ class NotebookSpecCompiler:
                 self.requirements_files.append(req_file)
                 logger.debug(f"Found requirements file: {req_file}")
 
-        logger.info(f"Found {len(self.requirements_files)} requirements.txt files")
-        return True
+        return self.info(f"Found {len(self.requirements_files)} requirements.txt files")
 
     def process_requirements(self) -> bool:
         """
@@ -537,10 +567,9 @@ class NotebookSpecCompiler:
             except Exception as e:
                 return self.exception(e, f"Error processing requirements file {req_file}: {e}")
 
-        logger.info(
+        return self.info(
             f"Processed requirements into {len(self.package_list)} unique packages"
         )
-        return True
 
     def generate_environment_specs(self) -> bool:
         """
@@ -557,7 +586,7 @@ class NotebookSpecCompiler:
             with open(pip_requirements, "w") as f:
                 for package in sorted(self.package_list):
                     f.write(f"{package}\n")
-            logger.info(f"Generated pip requirements file: {pip_requirements}")
+            self.info(f"Generated pip requirements file: {pip_requirements}")
         except Exception as e:
             return self.exception(e, f"Error generating pip requirements file: {e}")
 
@@ -586,11 +615,9 @@ class NotebookSpecCompiler:
             with open(conda_env, "w") as f:
                 yaml.dump(env_dict, f)
 
-            logger.info(f"Generated conda environment file: {conda_env}")
+            self.info(f"Generated conda environment file: {conda_env}")
         except Exception as e:
             return self.exception(e, f"Error generating conda environment file: {e}")
-
-        return True
 
     def generate_notebook_list(self) -> bool:
         """
@@ -607,18 +634,28 @@ class NotebookSpecCompiler:
             unique_notebooks = set()
 
             for nb_path in sorted(self.notebook_paths):
-                # Get path relative to repo root
-                rel_path = nb_path.relative_to(self.repo_dir)
-                unique_notebooks.add(str(rel_path))
+                # Find which repo this notebook belongs to
+                repo_path = None
+                for repo_url, path in self.repos_to_clone.items():
+                    if str(nb_path).startswith(str(path)):
+                        repo_path = path
+                        break
+            
+                if repo_path:
+                    # Get path relative to repo root
+                    rel_path = nb_path.relative_to(repo_path)
+                    unique_notebooks.add(str(rel_path))
+                else:
+                    # If we can't determine the repo, use the full path
+                    unique_notebooks.add(str(nb_path))
 
             with open(notebook_list, "w") as f:
                 for notebook in sorted(unique_notebooks):
                     f.write(f"{notebook}\n")
 
-            logger.info(
+            return self.info(
                 f"Generated notebook list with {len(unique_notebooks)} unique entries: {notebook_list}"
             )
-            return True
         except Exception as e:
             return self.exception(e, f"Error generating notebook list: {e}")
 
@@ -631,9 +668,9 @@ class NotebookSpecCompiler:
         """
         try:
             if hasattr(self, 'repo_base_dir') and self.repo_base_dir and os.path.exists(self.repo_base_dir):
-                logger.info(f"Cleaning up repository directory: {self.repo_base_dir}")
+                self.info(f"Cleaning up repository directory: {self.repo_base_dir}")
                 shutil.rmtree(self.repo_base_dir)
-            return True
+                return True
         except Exception as e:
             return self.exception(e, f"Error during cleanup: {e}")
 
