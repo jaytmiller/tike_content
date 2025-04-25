@@ -10,6 +10,7 @@ import shutil
 import traceback
 import re
 import json
+import pdb  # Add import for the debugger
 
 from pathlib import Path
 from datetime import datetime
@@ -31,7 +32,8 @@ class NotebookSpecCompiler:
     """
 
     def __init__(
-        self, spec_file: str, output_dir: str, verbose: bool = False, extract_imports: bool = False
+        self, spec_file: str, output_dir: str, verbose: bool = False, extract_imports: bool = False,
+        debug: bool = False
     ):
         """
         Initialize the notebook spec compiler.
@@ -41,11 +43,13 @@ class NotebookSpecCompiler:
             output_dir: Directory to store output files
             verbose: Enable verbose output
             extract_imports: Extract import statements from notebooks
+            debug: Enable debugging with pdb on errors
         """
         self.spec_file = spec_file
         self.output_dir = Path(output_dir)
         self.verbose = verbose
         self.extract_imports = extract_imports
+        self.debug = debug
         
         # Initialize empty values
         self.spec = {}
@@ -60,6 +64,39 @@ class NotebookSpecCompiler:
         
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
+    
+    def error(self, message: str) -> None:
+        """
+        Log an error message and optionally drop into the debugger if debug mode is enabled.
+        
+        Args:
+            message: The error message to log
+        """
+        logger.error(message)
+        if self.debug:
+            print(f"\n*** DEBUG MODE: Dropping into debugger due to error: {message} ***")
+            pdb.set_trace()
+    
+    def exception(self, e: Exception, message: str) -> bool:
+        """
+        Handle an exception: log the error message and either re-raise the exception
+        in debug mode or return False to indicate failure.
+        
+        Args:
+            e: The exception object
+            message: The error message to log
+        
+        Returns:
+            bool: Always False in non-debug mode (to indicate failure)
+            
+        Raises:
+            Exception: Re-raises the provided exception in debug mode
+        """
+        logger.error(message, exc_info=True)
+        if self.debug:
+            print(f"\n*** DEBUG MODE: Re-raising exception due to error: {message} ***")
+            raise e
+        return False  # Signal that execution should continue with error handling
 
     def run(self) -> bool:
         """
@@ -103,8 +140,7 @@ class NotebookSpecCompiler:
             
             return True
         except Exception as e:
-            logger.error(f"Error running compiler: {e}")
-            return False
+            return self.exception(e, f"Error running compiler: {e}")
         
     def _load_and_validate(self) -> bool:
         """Helper method to load and validate the spec."""
@@ -133,8 +169,7 @@ class NotebookSpecCompiler:
             logger.info(f"Successfully loaded spec from {self.spec_file}")
             return True
         except Exception as e:
-            logger.error(f"Failed to load YAML spec: {e}")
-            return False
+            return self.exception(e, f"Failed to load YAML spec: {e}")
 
     def validate_spec(self) -> bool:
         """
@@ -148,7 +183,7 @@ class NotebookSpecCompiler:
 
         for field in required_fields:
             if field not in self.spec:
-                logger.error(f"Missing required field: {field}")
+                self.error(f"Missing required field: {field}")
                 return False
 
         # Extract header information
@@ -157,13 +192,13 @@ class NotebookSpecCompiler:
         # Check for image name
         self.image_name = header.get("image_name")
         if not self.image_name:
-            logger.error("Missing image_name in image_spec_header")
+            self.error("Missing image_name in image_spec_header")
             return False
 
         # Check for notebook repository
         self.nb_repo = header.get("nb_repo")
         if not self.nb_repo:
-            logger.error("Missing nb_repo in image_spec_header")
+            self.error("Missing nb_repo in image_spec_header")
             return False
 
         # Get Python version
@@ -189,7 +224,7 @@ class NotebookSpecCompiler:
             bool: True if cloning was successful, False otherwise
         """
         if not self.nb_repo:
-            logger.error("No notebook repository specified in spec")
+            self.error("No notebook repository specified in spec")
             return False
 
         # Create a temporary directory for the clone
@@ -206,8 +241,7 @@ class NotebookSpecCompiler:
             logger.info(f"Successfully cloned repository to {self.repo_dir}")
             return True
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to clone repository: {e.stderr}")
-            return False
+            return self.exception(e, f"Failed to clone repository: {e.stderr}")
 
     def collect_notebook_paths(self) -> bool:
         """
@@ -220,7 +254,7 @@ class NotebookSpecCompiler:
 
         # Process selected_notebooks section
         if "selected_notebooks" not in self.spec:
-            logger.error("No selected_notebooks section in spec")
+            self.error("No selected_notebooks section in spec")
             return False
 
         repo_path = Path(self.repo_dir)
@@ -360,9 +394,9 @@ class NotebookSpecCompiler:
             return True
 
         except Exception as e:
-            logger.error(f"Error extracting imports from notebooks: {e}")
+            # Log the traceback separately since it's useful information
             logger.error(traceback.format_exc())
-            return False
+            return self.exception(e, f"Error extracting imports from notebooks: {e}")
 
     def find_requirements_files(self) -> bool:
         """
@@ -372,7 +406,7 @@ class NotebookSpecCompiler:
             bool: True if requirements files were found, False otherwise
         """
         if not self.repo_dir:
-            logger.error("Repository not cloned, cannot find requirements files")
+            self.error("Repository not cloned, cannot find requirements files")
             return False
 
         self.requirements_files = []
@@ -411,8 +445,7 @@ class NotebookSpecCompiler:
                             self.package_list.add(line)
                             logger.debug(f"Added package requirement: {line}")
             except Exception as e:
-                logger.error(f"Error processing requirements file {req_file}: {e}")
-                return False
+                return self.exception(e, f"Error processing requirements file {req_file}: {e}")
 
         logger.info(
             f"Processed requirements into {len(self.package_list)} unique packages"
@@ -436,8 +469,7 @@ class NotebookSpecCompiler:
                     f.write(f"{package}\n")
             logger.info(f"Generated pip requirements file: {pip_requirements}")
         except Exception as e:
-            logger.error(f"Error generating pip requirements file: {e}")
-            return False
+            return self.exception(e, f"Error generating pip requirements file: {e}")
 
         # Generate a simple conda environment YAML
         conda_env = (
@@ -466,8 +498,7 @@ class NotebookSpecCompiler:
 
             logger.info(f"Generated conda environment file: {conda_env}")
         except Exception as e:
-            logger.error(f"Error generating conda environment file: {e}")
-            return False
+            return self.exception(e, f"Error generating conda environment file: {e}")
 
         return True
 
@@ -499,8 +530,7 @@ class NotebookSpecCompiler:
             )
             return True
         except Exception as e:
-            logger.error(f"Error generating notebook list: {e}")
-            return False
+            return self.exception(e, f"Error generating notebook list: {e}")
 
     def cleanup(self) -> None:
         """Clean up temporary files and directories."""
@@ -531,6 +561,11 @@ def parse_args():
         action="store_true",
         help="Extract import statements from notebooks and save to separate files",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debugging with pdb on errors and preserve exception stack traces",
+    )
     return parser.parse_args()
 
 
@@ -543,6 +578,7 @@ def main():
         output_dir=args.output_dir,
         verbose=args.verbose,
         extract_imports=args.extract_imports,
+        debug=args.debug,
     )
 
     success = compiler.run()
