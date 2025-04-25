@@ -223,73 +223,108 @@ class NotebookSpecCompiler:
             bool: True if validation passed, False otherwise
         """
         # Define allowed keywords based on prototype-protocol.yaml
-        allowed_top_level_keywords = {"image_spec_header", "selected_notebooks"}
-        allowed_header_keywords = {
-            "image_name", "description", "valid_on", "expires_on", 
-            "python_version", "nb_repo", "root_nb_directory"
+        self.allowed_keywords = {
+            "top_level": ["image_spec_header", "selected_notebooks"],
+            "header": [
+                "image_name", "description", "valid_on", "expires_on", 
+                "python_version", "nb_repo", "root_nb_directory"
+            ],
+            "selected_notebooks_entry": [
+                "nb_repo", "root_nb_directory", "include_subdirs", "exclude_subdirs"
+            ]
         }
-        allowed_selected_notebooks_keywords = {"directories"}
-        allowed_directories_keywords = {
-            "include_subdirs", "exclude_subdirs", "nb_repo", "root_nb_directory"
-        }
+        
+        # Check for required fields and unknown keywords
+        if not self._validate_top_level_structure():
+            return False
+        
+        # Validate header section
+        if not self._validate_header_section():
+            return False
+        
+        # Validate selected_notebooks section
+        if not self._validate_selected_notebooks_section():
+            return False
+        
+        # Validate that all repositories in directory entries are specified
+        if not self._validate_directory_repos():
+            return False
 
+        return self.info(f"Spec validation passed for image: {self.image_name}")
+
+    def _validate_top_level_structure(self) -> bool:
+        """
+        Validate the top-level structure of the spec.
+        
+        Returns:
+            bool: True if validation passed, False otherwise
+        """
         # Check for required fields
         required_fields = ["image_spec_header", "selected_notebooks"]
-
         for field in required_fields:
             if field not in self.spec:
                 return self.error(f"Missing required field: {field}")
-
+        
         # Check for unknown top-level keywords
         for key in self.spec:
-            if key not in allowed_top_level_keywords:
+            if key not in self.allowed_keywords["top_level"]:
                 return self.error(f"Unknown top-level keyword: {key}")
+                
+        return True
 
-        # Extract header information
+    def _validate_header_section(self) -> bool:
+        """
+        Validate the image_spec_header section.
+        
+        Returns:
+            bool: True if validation passed, False otherwise
+        """
         header = self.spec["image_spec_header"]
-
+        
         # Check for unknown header keywords
         for key in header:
-            if key not in allowed_header_keywords:
+            if key not in self.allowed_keywords["header"]:
                 return self.error(f"Unknown keyword in image_spec_header: {key}")
-
+        
         # Check for required header fields
         required_header_fields = ["image_name", "python_version", "valid_on", "expires_on", "nb_repo"]
         for field in required_header_fields:
             if field not in header:
                 return self.error(f"Missing required field in image_spec_header: {field}")
-
+        
         # Extract header values
         self.image_name = header["image_name"]
         self.python_version = header["python_version"]
         self.valid_on = header["valid_on"]
         self.expires_on = header["expires_on"]
         self.default_nb_repo = header["nb_repo"]
-
+        
         # Get default root notebook directory
         self.default_root_nb_directory = header.get("root_nb_directory", "")
+        
+        return True
 
-        # Validate selected_notebooks section
-        if "selected_notebooks" in self.spec:
-            for entry in self.spec["selected_notebooks"]:
-                # Check for unknown keywords in selected_notebooks entries
-                for key in entry:
-                    if key not in allowed_selected_notebooks_keywords:
-                        return self.error(f"Unknown keyword in selected_notebooks entry: {key}")
-            
-                # Check directories section if present
-                if "directories" in entry:
-                    directories = entry["directories"]
-                    for key in directories:
-                        if key not in allowed_directories_keywords:
-                            return self.error(f"Unknown keyword in directories section: {key}")
-
-        # Validate that all repositories in directory entries are specified
-        # Each 'directories' block in selected_notebooks can specify its own repository
-        if not self._validate_directory_repos():
-            return False
-
-        return self.info(f"Spec validation passed for image: {self.image_name}")
+    def _validate_selected_notebooks_section(self) -> bool:
+        """
+        Validate the selected_notebooks section.
+        
+        Returns:
+            bool: True if validation passed, False otherwise
+        """
+        if "selected_notebooks" not in self.spec:
+            return self.error("Missing selected_notebooks section")
+        
+        # Update allowed keywords for the new structure
+        allowed_entry_keywords = [
+            "nb_repo", "root_nb_directory", "include_subdirs", "exclude_subdirs"
+        ]
+        
+        for entry in self.spec["selected_notebooks"]:
+            for key in entry:
+                if key not in allowed_entry_keywords:
+                    return self.error(f"Unknown keyword in selected_notebooks entry: {key}")
+        
+        return True
 
     def _validate_directory_repos(self) -> bool:
         """
@@ -305,14 +340,13 @@ class NotebookSpecCompiler:
         self.repos_to_clone = {self.default_nb_repo: None}  # repo_url -> cloned_path
         
         for entry in self.spec["selected_notebooks"]:
-            if "directories" in entry:
-                # Check if this entry specifies a custom repository
-                nb_repo = entry.get("nb_repo", self.default_nb_repo)
-                if not nb_repo:
-                    return self.error(f"Missing repository for directory entry: {entry}")
-                
-                # Add to the list of repos to clone
-                self.repos_to_clone[nb_repo] = None
+            # Check if this entry specifies a custom repository
+            nb_repo = entry.get("nb_repo", self.default_nb_repo)
+            if not nb_repo:
+                return self.error(f"Missing repository for entry: {entry}")
+            
+            # Add to the list of repos to clone
+            self.repos_to_clone[nb_repo] = None
         
         return True
 
@@ -353,34 +387,30 @@ class NotebookSpecCompiler:
             except subprocess.CalledProcessError as e:
                 return self.exception(e, f"Failed to clone repository {repo_url}: {e.stderr}")
 
-    def collect_notebook_paths(self) -> bool:
+    def process_notebooks(self) -> bool:
         """
-        Collect notebook paths based on the spec and cloned repositories.
-
+        Process all notebooks specified in the spec.
+        
         Returns:
-            bool: True if collection was successful, False otherwise
+            bool: True if processing was successful, False otherwise
         """
         self.notebook_paths = []
-
-        # Process selected_notebooks section
-        if "selected_notebooks" not in self.spec:
-            return self.error("No selected_notebooks section in spec")
-
-        for entry in self.spec["selected_notebooks"]:
-            if "directories" in entry:
-                # Get the repository and root directory for this entry
-                nb_repo = entry.get("nb_repo", self.default_nb_repo)
-                root_nb_directory = entry.get("root_nb_directory", self.default_root_nb_directory)
-                
-                # Get the cloned repo path
-                repo_dir = self.repos_to_clone.get(nb_repo)
-                if not repo_dir:
-                    return self.error(f"Repository not found or not cloned: {nb_repo}")
-                
-                # Process the directory entry
-                self._process_directory_entry(entry, Path(repo_dir), root_nb_directory)
         
-        return self.info(f"Collected {len(self.notebook_paths)} notebooks")
+        for entry in self.spec["selected_notebooks"]:
+            # Get repository and directory information
+            nb_repo = entry.get("nb_repo", self.default_nb_repo)
+            
+            # Find the repository directory
+            repo_name = nb_repo.split('/')[-1].replace('.git', '')
+            repo_dir = Path(self.repo_base_dir) / repo_name
+            
+            # Get root notebook directory (default or override)
+            root_nb_directory = entry.get("root_nb_directory", self.default_root_nb_directory)
+            
+            # Process this directory entry
+            self._process_directory_entry(entry, repo_dir, root_nb_directory)
+        
+        return self.info(f"Found {len(self.notebook_paths)} notebooks")
 
     def _process_directory_entry(self, entry: dict, repo_dir: Path, root_nb_directory: str) -> None:
         """
@@ -391,7 +421,17 @@ class NotebookSpecCompiler:
             repo_dir: Path to the repository
             root_nb_directory: Root notebook directory within the repository
         """
-        directories = entry["directories"]
+        # Get the repository override if specified
+        nb_repo = entry.get("nb_repo", self.default_nb_repo)
+        
+        # Use the correct repository directory based on the override
+        if nb_repo != self.default_nb_repo:
+            repo_name = nb_repo.split('/')[-1].replace('.git', '')
+            repo_dir = Path(self.repo_base_dir) / repo_name
+        
+        # Get the root_nb_directory override if specified
+        if "root_nb_directory" in entry:
+            root_nb_directory = entry["root_nb_directory"]
         
         # Construct the base path for notebooks
         base_path = repo_dir
@@ -399,7 +439,7 @@ class NotebookSpecCompiler:
             base_path = base_path / root_nb_directory
         
         # Process include_subdirs
-        include_subdirs = directories.get("include_subdirs", ["."])
+        include_subdirs = entry.get("include_subdirs", ["."])
         for subdir in include_subdirs:
             subdir_path = base_path / subdir
             if not subdir_path.exists():
@@ -409,7 +449,7 @@ class NotebookSpecCompiler:
             # Find all notebooks in this directory
             for nb_path in subdir_path.glob("**/*.ipynb"):
                 # Check if the notebook is in an excluded directory
-                exclude_subdirs = directories.get("exclude_subdirs", [])
+                exclude_subdirs = entry.get("exclude_subdirs", [])
                 excluded = False
                 for exclude in exclude_subdirs:
                     exclude_path = base_path / exclude
