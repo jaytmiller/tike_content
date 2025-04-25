@@ -76,10 +76,22 @@ class NotebookSpecCompiler:
         if self.debug:
             print(f"\n*** DEBUG MODE: Dropping into debugger due to error: {message} ***")
             pdb.set_trace()
+
+    def info(self, message: str) -> None:
+        """
+        Log an info message.
+        
+        Args:
+            message: The info message to log
+            
+        Returns: True
+        """
+        logger.info(message)
+        return True
     
     def exception(self, e: Exception, message: str) -> bool:
         """
-        Handle an exception: log the error message and either re-raise the exception
+        Handle an exception: log the error message and either drop into the debugger
         in debug mode or return False to indicate failure.
         
         Args:
@@ -90,11 +102,18 @@ class NotebookSpecCompiler:
             bool: Always False in non-debug mode (to indicate failure)
             
         Raises:
-            Exception: Re-raises the provided exception in debug mode
+            Exception: Re-raises the provided exception in debug mode after pdb session ends
         """
         logger.error(message, exc_info=True)
         if self.debug:
-            print(f"\n*** DEBUG MODE: Re-raising exception due to error: {message} ***")
+            print(f"\n*** DEBUG MODE: Exception caught: {message} ***")
+            print("*** Dropping into debugger. Type 'c' to continue and raise the exception, or 'q' to quit. ***")
+            print(f"*** Exception type: {type(e).__name__} ***")
+            print(f"*** Exception message: {str(e)} ***")
+            print("*** Traceback (most recent call last): ***")
+            traceback.print_tb(e.__traceback__)
+            pdb.post_mortem(e.__traceback__)  # This will start the debugger at the point of the exception
+            # If the user continues from the debugger, we'll raise the exception
             raise e
         return False  # Signal that execution should continue with error handling
 
@@ -110,7 +129,15 @@ class NotebookSpecCompiler:
             if not self.load_spec():
                 return False
             
-            # Collect notebook paths (now includes repository cloning)
+            # Validate the spec
+            if not self.validate_spec():
+                return False
+        
+            # Clone the repository
+            if not self.clone_repository():
+                return False
+        
+            # Collect notebook paths
             if not self.collect_notebook_paths():
                 return False
             
@@ -195,9 +222,9 @@ class NotebookSpecCompiler:
             self.error("Missing image_name in image_spec_header")
             return False
 
-        # Check for notebook repository
-        self.nb_repo = header.get("nb_repo")
-        if not self.nb_repo:
+        # Check for default notebook repository
+        self.default_nb_repo = header.get("nb_repo")
+        if not self.default_nb_repo:
             self.error("Missing nb_repo in image_spec_header")
             return False
 
@@ -206,46 +233,88 @@ class NotebookSpecCompiler:
         if not self.python_version:
             logger.warning("No Python version specified, will use default")
 
-        # Get root notebook directory
-        self.root_nb_directory = header.get("root_nb_directory", "")
+        # Get default root notebook directory
+        self.default_root_nb_directory = header.get("root_nb_directory", "")
 
         # Get validity dates
         self.valid_on = header.get("valid_on")
         self.expires_on = header.get("expires_on")
 
+        # Validate that all repositories in directory entries are specified
+        if not self._validate_directory_repos():
+            return False
+
         logger.info(f"Spec validation passed for image: {self.image_name}")
+        return True
+
+    def _validate_directory_repos(self) -> bool:
+        """
+        Validate that all repositories in directory entries are specified.
+        
+        Returns:
+            bool: True if validation passed, False otherwise
+        """
+        if "selected_notebooks" not in self.spec:
+            self.error("No selected_notebooks section in spec")
+            return False
+        
+        # Track all repositories that need to be cloned
+        self.repos_to_clone = {self.default_nb_repo: None}  # repo_url -> cloned_path
+        
+        for entry in self.spec["selected_notebooks"]:
+            if "directories" in entry:
+                # Check if this entry specifies a custom repository
+                nb_repo = entry.get("nb_repo", self.default_nb_repo)
+                if not nb_repo:
+                    self.error(f"Missing repository for directory entry: {entry}")
+                    return False
+                
+                # Add to the list of repos to clone
+                self.repos_to_clone[nb_repo] = None
+        
         return True
 
     def clone_repository(self) -> bool:
         """
-        Clone the notebook repository specified in the spec.
+        Clone all repositories specified in the spec.
 
         Returns:
             bool: True if cloning was successful, False otherwise
         """
-        if not self.nb_repo:
-            self.error("No notebook repository specified in spec")
+        if not hasattr(self, 'repos_to_clone') or not self.repos_to_clone:
+            self.error("No repositories to clone")
             return False
 
-        # Create a temporary directory for the clone
-        self.repo_dir = tempfile.mkdtemp(prefix="notebook-repo-")
-        logger.info(f"Cloning repository {self.nb_repo} to {self.repo_dir}")
-
-        try:
-            subprocess.run(
-                ["git", "clone", self.nb_repo, self.repo_dir],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.info(f"Successfully cloned repository to {self.repo_dir}")
-            return True
-        except subprocess.CalledProcessError as e:
-            return self.exception(e, f"Failed to clone repository: {e.stderr}")
+        # Create a temporary directory for the clones if it doesn't exist
+        self.repo_base_dir = tempfile.mkdtemp(prefix="notebook-repos-")
+        logger.info(f"Using base directory for repositories: {self.repo_base_dir}")
+        
+        # Clone each repository
+        for repo_url in self.repos_to_clone:
+            # Create a unique directory name based on the repo URL
+            repo_name = repo_url.split('/')[-1].replace('.git', '')
+            repo_dir = os.path.join(self.repo_base_dir, repo_name)
+            
+            logger.info(f"Cloning repository {repo_url} to {repo_dir}")
+            
+            try:
+                subprocess.run(
+                    ["git", "clone", repo_url, repo_dir],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                # Store the cloned path
+                self.repos_to_clone[repo_url] = repo_dir
+                logger.info(f"Successfully cloned repository {repo_url} to {repo_dir}")
+            except subprocess.CalledProcessError as e:
+                return self.exception(e, f"Failed to clone repository {repo_url}: {e.stderr}")
+        
+        return True
 
     def collect_notebook_paths(self) -> bool:
         """
-        Collect notebook paths based on the spec and cloned repository.
+        Collect notebook paths based on the spec and cloned repositories.
 
         Returns:
             bool: True if collection was successful, False otherwise
@@ -257,11 +326,20 @@ class NotebookSpecCompiler:
             self.error("No selected_notebooks section in spec")
             return False
 
-        repo_path = Path(self.repo_dir)
-        
         for entry in self.spec["selected_notebooks"]:
             if "directories" in entry:
-                self._process_directory_entry(entry, repo_path)
+                # Get the repository and root directory for this entry
+                nb_repo = entry.get("nb_repo", self.default_nb_repo)
+                root_nb_directory = entry.get("root_nb_directory", self.default_root_nb_directory)
+                
+                # Get the cloned repo path
+                repo_dir = self.repos_to_clone.get(nb_repo)
+                if not repo_dir:
+                    self.error(f"Repository not found or not cloned: {nb_repo}")
+                    return False
+                
+                # Process the directory entry
+                self._process_directory_entry(entry, Path(repo_dir), root_nb_directory)
         
         logger.info(f"Collected {len(self.notebook_paths)} notebooks")
         return True
@@ -303,6 +381,18 @@ class NotebookSpecCompiler:
             
                 if not excluded:
                     self.notebook_paths.append(nb_path)
+
+    def process_imports(self) -> bool:
+        """
+        Process imports from notebooks if requested.
+        
+        Returns:
+            bool: True if processing was successful, False otherwise
+        """
+        if not self.extract_imports:
+            logger.info("Notebook import extraction not requested. Use --extract-imports to request or specify packages in the spec file.")
+            return True
+        return self.extract_notebook_imports()
 
     def extract_notebook_imports(self) -> bool:
         """
@@ -532,12 +622,20 @@ class NotebookSpecCompiler:
         except Exception as e:
             return self.exception(e, f"Error generating notebook list: {e}")
 
-    def cleanup(self) -> None:
-        """Clean up temporary files and directories."""
-        if self.repo_dir and os.path.exists(self.repo_dir):
-            logger.info(f"Cleaning up repository directory: {self.repo_dir}")
-            shutil.rmtree(self.repo_dir)
-
+    def cleanup(self) -> bool:
+        """
+        Clean up temporary files and directories.
+        
+        Returns:
+            bool: True if cleanup was successful, False otherwise
+        """
+        try:
+            if hasattr(self, 'repo_base_dir') and self.repo_base_dir and os.path.exists(self.repo_base_dir):
+                logger.info(f"Cleaning up repository directory: {self.repo_base_dir}")
+                shutil.rmtree(self.repo_base_dir)
+            return True
+        except Exception as e:
+            return self.exception(e, f"Error during cleanup: {e}")
 
 def parse_args():
     """Parse command line arguments."""
