@@ -24,12 +24,6 @@ from typing import List, Dict, Optional, Any, Set
 
 from ruamel.yaml import YAML  # Replace standard yaml with ruamel.yaml
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("spec-compiler")
-
 
 class NotebookSpecCompiler:
     """
@@ -59,9 +53,15 @@ class NotebookSpecCompiler:
         self.repos_dir = Path(repos_dir) if repos_dir else Path(os.getcwd()) / "notebook-repos"
         self.verbose = verbose
         self.extract_imports = extract_imports
-        self.debug = debug
+        self.debug_mode = debug
         self.cleanup = cleanup
         
+        # Set up logging
+        logging.basicConfig(
+            level=logging.DEBUG if self.debug_mode else logging.INFO, 
+                format="%(asctime)s - %(levelname)s - %(message)s")
+        self.logger = logging.getLogger("curator")
+
         # Initialize empty values
         self.spec = {}
         self.image_name = ""
@@ -84,8 +84,8 @@ class NotebookSpecCompiler:
         Log an error message and optionally drop into the debugger if debug mode
         is enabled. return False indicating failure.
         """
-        logger.error(message)
-        if self.debug:
+        self.logger.error(message)
+        if self.debug_mode:
             print(f"\n*** DEBUG MODE: Dropping into debugger due to error: {message} ***")
             pdb.set_trace()
         return False
@@ -94,15 +94,22 @@ class NotebookSpecCompiler:
         """
         Log an info message. return True indicating success.
         """
-        logger.info(message)
+        self.logger.info(message)
         return True
     
     def warning(self, message: str) -> bool:
         """
         Log a warning message. return True indicating success.
         """
-        logger.warning(message)
+        self.logger.warning(message)
         return True
+    
+    def debug(self, message: str) -> None:
+        """
+        Log a debug message. return None
+        """
+        self.logger.debug(message)
+        return None
     
     def exception(self, e: Exception, message: str) -> bool:
         """
@@ -119,8 +126,8 @@ class NotebookSpecCompiler:
         Raises:
             Exception: Re-raises the provided exception in debug mode after pdb session ends
         """
-        logger.error(message, exc_info=True)
-        if self.debug:
+        self.logger.error(message, exc_info=True)
+        if self.debug_mode:
             print(f"\n*** DEBUG MODE: Exception caught: {message} ***")
             print("*** Dropping into debugger. Type 'c' to continue and raise the exception, or 'q' to quit. ***")
             print(f"*** Exception type: {type(e).__name__} ***")
@@ -500,7 +507,7 @@ class NotebookSpecCompiler:
         for subdir in include_subdirs:
             subdir_path = base_path / subdir
             if not subdir_path.exists():
-                logger.warning(f"Included directory does not exist: {subdir_path}")
+                self.warning(f"Included directory does not exist: {subdir_path}")
                 continue
         
             # Find all notebooks in this directory
@@ -536,7 +543,7 @@ class NotebookSpecCompiler:
             bool: True if extraction was successful, False otherwise
         """
         if not self.notebook_paths:
-            return logger.warning("No notebooks found to extract imports from")
+            return self.warning("No notebooks found to extract imports from")
 
         # Create the extraction directory
         extract_dir = self.output_dir / "extracted"
@@ -582,7 +589,7 @@ class NotebookSpecCompiler:
             for package in sorted(imports):
                 f.write(f"{package}\n")
 
-        logger.debug(f"Extracted {len(imports)} imports from {rootname} to {output_file}")
+        self.debug(f"Extracted {len(imports)} imports from {rootname} to {output_file}")
 
     def _read_notebook_json(self, nb_path: Path) -> Optional[dict]:
         """
@@ -598,7 +605,7 @@ class NotebookSpecCompiler:
             with open(nb_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            logger.warning(f"Could not parse notebook {nb_path} as JSON")
+            self.warning(f"Could not parse notebook {nb_path} as JSON")
             return None
 
     def _extract_imports_from_notebook(self, notebook: dict) -> Set[str]:
@@ -693,7 +700,7 @@ class NotebookSpecCompiler:
             req_file = dir_path / "requirements.txt"
             if req_file.exists():
                 self.requirements_files.append(req_file)
-                logger.debug(f"Found requirements file: {req_file}")
+                self.debug(f"Found requirements file: {req_file}")
 
         return self.info(f"Found {len(self.requirements_files)} requirements.txt files")
 
@@ -705,8 +712,7 @@ class NotebookSpecCompiler:
             bool: True if processing was successful, False otherwise
         """
         if not self.requirements_files:
-            logger.warning("No requirements.txt files found")
-            return True
+            return self.warning("No requirements.txt files found")
 
         for req_file in self.requirements_files:
             try:
@@ -716,7 +722,7 @@ class NotebookSpecCompiler:
                         line = line.strip()
                         if line and not line.startswith("#"):
                             self.package_list.add(line)
-                            logger.debug(f"Added package requirement: {line}")
+                            self.debug(f"Added package requirement: {line}")
             except Exception as e:
                 return self.exception(e, f"Error processing requirements file {req_file}: {e}")
 
