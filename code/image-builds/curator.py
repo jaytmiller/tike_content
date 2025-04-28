@@ -33,7 +33,8 @@ class NotebookSpecCompiler:
 
     def __init__(
         self, spec_file: str, output_dir: str, repos_dir: str = None, verbose: bool = False, 
-        extract_imports: bool = False, debug: bool = False, cleanup: bool = False
+        extract_imports: bool = False, debug: bool = False, cleanup: bool = False,
+        use_pip_compile: bool = False
     ):
         """
         Initialize the notebook spec compiler.
@@ -46,6 +47,7 @@ class NotebookSpecCompiler:
             extract_imports: Extract import statements from notebooks
             debug: Enable debugging with pdb on errors
             cleanup: Whether to clean up repository clones after execution
+            use_pip_compile: Whether to use pip-compile to generate pinned requirements
         """
         self.spec_file = spec_file
         self.output_dir = Path(output_dir)
@@ -55,6 +57,7 @@ class NotebookSpecCompiler:
         self.extract_imports = extract_imports
         self.debug_mode = debug
         self.cleanup = cleanup
+        self.use_pip_compile = use_pip_compile
         
         # Set up logging
         logging.basicConfig(
@@ -182,6 +185,11 @@ class NotebookSpecCompiler:
             # Extract imports if requested
             if not self.process_imports():
                 return False
+            
+            # Compile requirements with pip-compile if requested
+            if self.use_pip_compile:
+                if not self.compile_requirements():
+                    return False
             
             # Clean up if requested
             if self.cleanup:
@@ -697,7 +705,7 @@ class NotebookSpecCompiler:
         notebook_dirs = {nb_path.parent for nb_path in self.notebook_paths}
 
         for dir_path in notebook_dirs:
-            req_file = dir_path / "requirements.txt"
+            req_file = (dir_path / "requirements.txt").relative_to(os.getcwd())
             if req_file.exists():
                 self.requirements_files.append(req_file)
                 self.debug(f"Found requirements file: {req_file}")
@@ -722,7 +730,7 @@ class NotebookSpecCompiler:
                         line = line.strip()
                         if line and not line.startswith("#"):
                             self.package_list.add(line)
-                            self.debug(f"Added package requirement: {line}")
+                            self.debug(f"From {req_file} added package requirement: {line}")
             except Exception as e:
                 return self.exception(e, f"Error processing requirements file {req_file}: {e}")
 
@@ -774,7 +782,7 @@ class NotebookSpecCompiler:
             with open(conda_env, "w") as f:
                 yaml.dump(env_dict, f)
 
-            self.info(f"Generated conda environment file: {conda_env}")
+            return self.info(f"Generated conda environment file: {conda_env}")
         except Exception as e:
             return self.exception(e, f"Error generating conda environment file: {e}")
 
@@ -795,7 +803,7 @@ class NotebookSpecCompiler:
             for nb_path in sorted(self.notebook_paths):
                 # Find which repo this notebook belongs to
                 repo_path = None
-                for repo_url, path in self.repos_to_clone.items():
+                for repo_url, path in self.repos_to_setup.items():
                     if str(nb_path).startswith(str(path)):
                         repo_path = path
                         break
@@ -855,6 +863,69 @@ class NotebookSpecCompiler:
         except Exception as e:
             return self.exception(e, f"Error generating package list: {e}")
 
+    def compile_requirements(self) -> bool:
+        """
+        Compile requirements files into a fully specified dependency list using pip-compile.
+        
+        This method takes all discovered requirements files and uses pip-compile to generate
+        a fully pinned requirements file with exact versions for all dependencies.
+        
+        Returns:
+            bool: True if compilation was successful, False otherwise
+        """
+        try:
+            if not self.requirements_files:
+                return self.warning("No requirements files found to compile")
+            
+            # Create a temporary combined requirements file
+            combined_req_file = self.output_dir / "combined_requirements.txt"
+            with open(combined_req_file, "w") as outfile:
+                for req_file in self.requirements_files:
+                    self.info(f"Adding requirements from {req_file}")
+                    with open(req_file, "r") as infile:
+                        outfile.write(f"# From {req_file}\n")
+                        outfile.write(infile.read())
+                        outfile.write("\n\n")
+            
+            # Output file path for the compiled requirements
+            compiled_req_file = self.output_dir / f"{self.image_name.replace(' ', '_')}_compiled_requirements.txt"
+            
+            # Run pip-compile to generate pinned requirements
+            self.info(f"Running pip-compile on combined requirements")
+            try:
+                result = subprocess.run(
+                    [
+                        "pip-compile", 
+                        "--output-file", str(compiled_req_file),
+                        "--no-header",
+                        "--no-emit-index-url",
+                        "--allow-unsafe",
+                        str(combined_req_file)
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.info(f"Successfully compiled requirements to {compiled_req_file}")
+                
+                # Read the compiled requirements and add them to the package list
+                with open(compiled_req_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            self.package_list.add(line)
+                
+                # Clean up the temporary combined file
+                os.remove(combined_req_file)
+                
+                return True
+                
+            except subprocess.CalledProcessError as e:
+                return self.error(f"pip-compile failed: {e.stderr}")
+                
+        except Exception as e:
+            return self.exception(e, f"Error compiling requirements: {e}")
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -882,6 +953,11 @@ def parse_args():
         action="store_true",
         help="Enable debugging with pdb on errors and preserve exception stack traces",
     )
+    parser.add_argument(
+        "--use-pip-compile",
+        action="store_true",
+        help="Use pip-compile to generate pinned requirements",
+    )
     return parser.parse_args()
 
 
@@ -895,6 +971,7 @@ def main():
         verbose=args.verbose,
         extract_imports=args.extract_imports,
         debug=args.debug,
+        use_pip_compile=args.use_pip_compile,
     )
 
     success = compiler.run()
