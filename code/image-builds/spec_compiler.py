@@ -543,81 +543,136 @@ class NotebookSpecCompiler:
         os.makedirs(extract_dir, exist_ok=True)
 
         try:
-            # Regular expressions to match import statements
-            # Matches both "import package" and "from package import something"
-            import_pattern = re.compile(
-                r"^(?:import\s+([a-zA-Z0-9_\.]+))|(?:from\s+([a-zA-Z0-9_\.]+)\s+import)"
-            )
-
             # Use a set to ensure each notebook is processed only once
             unique_notebooks = set(str(nb_path) for nb_path in self.notebook_paths)
-            self.info(
-                f"Processing {len(unique_notebooks)} unique notebooks for import extraction"
-            )
+            self.info(f"Processing {len(unique_notebooks)} unique notebooks for import extraction")
 
             for nb_path_str in unique_notebooks:
                 nb_path = Path(nb_path_str)
-                # Get notebook rootname
-                rootname = nb_path.stem
+                self._process_notebook_for_imports(nb_path, extract_dir)
 
-                # Read the notebook
-                with open(nb_path, "r", encoding="utf-8") as f:
-                    try:
-                        notebook = json.load(f)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Could not parse notebook {nb_path} as JSON")
-                        continue
-
-                # Extract import statements
-                imports = set()
-
-                # Process each cell
-                for cell in notebook.get("cells", []):
-                    if cell.get("cell_type") == "code":
-                        # Get the source code as a string
-                        if isinstance(cell.get("source"), list):
-                            source = "".join(cell.get("source", []))
-                        else:
-                            source = cell.get("source", "")
-
-                        # Process each line
-                        for line in source.split("\n"):
-                            line = line.strip()
-                            match = import_pattern.match(line)
-                            if match:
-                                # The pattern has two capture groups, one for each import style
-                                # Take the first non-None group
-                                package_path = match.group(1) or match.group(2)
-
-                                # Extract the root package (first component before any dots)
-                                root_package = package_path.split(".")[0]
-
-                                # Skip built-in modules and special imports
-                                if root_package not in [
-                                    "__future__",
-                                    "builtins",
-                                    "sys",
-                                    "os",
-                                ]:
-                                    imports.add(root_package)
-
-                # Write imports to file
-                output_file = extract_dir / f"imports-{rootname}.pip"
-                with open(output_file, "w") as f:
-                    for package in sorted(imports):
-                        f.write(f"{package}\n")
-
-                logger.debug(
-                    f"Extracted {len(imports)} imports from {rootname} to {output_file}"
-                )
-
-            self.info(
-                f"Extracted imports from {len(unique_notebooks)} unique notebooks to {extract_dir}"
-            )
+            self.info(f"Extracted imports from {len(unique_notebooks)} unique notebooks to {extract_dir}")
             return True
 
         except Exception as e:
             return self.exception(e, f"Error extracting imports from notebooks: {e}")
+
+    def _process_notebook_for_imports(self, nb_path: Path, extract_dir: Path) -> None:
+        """
+        Process a single notebook to extract imports and write them to a file.
+        
+        Args:
+            nb_path: Path to the notebook file
+            extract_dir: Directory to write extracted imports
+        """
+        # Get notebook rootname
+        rootname = nb_path.stem
+
+        # Read and parse the notebook
+        notebook = self._read_notebook_json(nb_path)
+        if not notebook:
+            return
+        
+        # Extract imports from the notebook
+        imports = self._extract_imports_from_notebook(notebook)
+        
+        # Write imports to file
+        output_file = extract_dir / f"imports-{rootname}.pip"
+        with open(output_file, "w") as f:
+            for package in sorted(imports):
+                f.write(f"{package}\n")
+
+        logger.debug(f"Extracted {len(imports)} imports from {rootname} to {output_file}")
+
+    def _read_notebook_json(self, nb_path: Path) -> Optional[dict]:
+        """
+        Read and parse a notebook file as JSON.
+        
+        Args:
+            nb_path: Path to the notebook file
+        
+        Returns:
+            Optional[dict]: The parsed notebook as a dictionary, or None if parsing failed
+        """
+        try:
+            with open(nb_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(f"Could not parse notebook {nb_path} as JSON")
+            return None
+
+    def _extract_imports_from_notebook(self, notebook: dict) -> Set[str]:
+        """
+        Extract import statements from a notebook.
+        
+        Args:
+            notebook: The notebook as a dictionary
+        
+        Returns:
+            Set[str]: Set of imported package names
+        """
+        # Regular expressions to match import statements
+        # Matches both "import package" and "from package import something"
+        import_pattern = re.compile(
+            r"^(?:import\s+([a-zA-Z0-9_\.]+))|(?:from\s+([a-zA-Z0-9_\.]+)\s+import)"
+        )
+        
+        imports = set()
+        
+        # Process each cell
+        for cell in notebook.get("cells", []):
+            if cell.get("cell_type") == "code":
+                source = self._get_cell_source(cell)
+                
+                # Process each line
+                for line in source.split("\n"):
+                    line = line.strip()
+                    match = import_pattern.match(line)
+                    if match:
+                        root_package = self._extract_root_package(match)
+                        if root_package:
+                            imports.add(root_package)
+        
+        return imports
+
+    def _get_cell_source(self, cell: dict) -> str:
+        """
+        Get the source code from a notebook cell.
+        
+        Args:
+            cell: The notebook cell as a dictionary
+        
+        Returns:
+            str: The source code as a string
+        """
+        # Get the source code as a string
+        if isinstance(cell.get("source"), list):
+            return "".join(cell.get("source", []))
+        else:
+            return cell.get("source", "")
+
+    def _extract_root_package(self, match) -> Optional[str]:
+        """
+        Extract the root package name from a regex match of an import statement.
+        
+        Args:
+            match: The regex match object
+        
+        Returns:
+            Optional[str]: The root package name, or None if it's a built-in module
+        """
+        # The pattern has two capture groups, one for each import style
+        # Take the first non-None group
+        package_path = match.group(1) or match.group(2)
+        
+        # Extract the root package (first component before any dots)
+        root_package = package_path.split(".")[0]
+        
+        # Skip built-in modules and special imports
+        if root_package in ["__future__", "builtins", "sys", "os"]:
+            return None
+        
+        return root_package
 
     def find_requirements_files(self) -> bool:
         """
