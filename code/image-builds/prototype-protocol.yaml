@@ -23,8 +23,6 @@ selected_notebooks:
       - zooniverse_view_lightcurve/
   - nb_repo: https://github.com/spacetelescope/mast_notebooks
     root_nb_directory: notebooks/tess
-    include_subdirs:
-      - .
     exclude_subdirs:
       - removing_scattered_light_using_regression
 

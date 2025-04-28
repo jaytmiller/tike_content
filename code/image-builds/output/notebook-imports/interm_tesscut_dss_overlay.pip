@@ -1,0 +1,6 @@
+astropy
+astroquery
+lightkurve
+matplotlib
+reproject
+requests

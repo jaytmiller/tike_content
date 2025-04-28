@@ -88,9 +88,6 @@ class NotebookSpecCompiler:
         is enabled. return False indicating failure.
         """
         self.logger.error(message)
-        if self.debug_mode:
-            print(f"\n*** DEBUG MODE: Dropping into debugger due to error: {message} ***")
-            pdb.set_trace()
         return False
 
     def info(self, message: str) -> bool:
@@ -518,18 +515,18 @@ class NotebookSpecCompiler:
                 self.warning(f"Included directory does not exist: {subdir_path}")
                 continue
         
+            self.debug(f"Scanning {subdir_path} for notebooks")
             # Find all notebooks in this directory
             for nb_path in subdir_path.glob("**/*.ipynb"):
                 # Check if the notebook is in an excluded directory
                 exclude_subdirs = entry.get("exclude_subdirs", [])
                 excluded = False
                 for exclude in exclude_subdirs:
-                    exclude_path = base_path / exclude
-                    if str(nb_path).startswith(str(exclude_path)):
-                        excluded = True
+                    if exclude in str(nb_path):
+                        self.debug(f"Excluding {nb_path} due to {exclude}")
                         break
-            
-                if not excluded:
+                else:
+                    self.debug(f"Including {nb_path}")
                     self.notebook_paths.append(nb_path)
 
     def process_imports(self) -> bool:
@@ -554,7 +551,7 @@ class NotebookSpecCompiler:
             return self.warning("No notebooks found to extract imports from")
 
         # Create the extraction directory
-        extract_dir = self.output_dir / "extracted"
+        extract_dir = self.output_dir / "notebook-imports"
         os.makedirs(extract_dir, exist_ok=True)
 
         try:
@@ -592,7 +589,7 @@ class NotebookSpecCompiler:
         imports = self._extract_imports_from_notebook(notebook)
         
         # Write imports to file
-        output_file = extract_dir / f"imports-{rootname}.pip"
+        output_file = extract_dir / f"{rootname}.pip"
         with open(output_file, "w") as f:
             for package in sorted(imports):
                 f.write(f"{package}\n")
@@ -703,9 +700,8 @@ class NotebookSpecCompiler:
 
         # Look for requirements.txt in the same directories as notebooks
         notebook_dirs = {nb_path.parent for nb_path in self.notebook_paths}
-
         for dir_path in notebook_dirs:
-            req_file = (dir_path / "requirements.txt").relative_to(os.getcwd())
+            req_file = dir_path / "requirements.txt"
             if req_file.exists():
                 self.requirements_files.append(req_file)
                 self.debug(f"Found requirements file: {req_file}")
@@ -826,7 +822,7 @@ class NotebookSpecCompiler:
         except Exception as e:
             return self.exception(e, f"Error generating notebook list: {e}")
 
-    def cleanup(self) -> bool:
+    def cleanup_repos(self) -> bool:
         """
         Clean up temporary files and directories.
         
@@ -834,9 +830,9 @@ class NotebookSpecCompiler:
             bool: True if cleanup was successful, False otherwise
         """
         try:
-            if hasattr(self, 'repo_base_dir') and self.repo_base_dir and os.path.exists(self.repo_base_dir):
-                self.info(f"Cleaning up repository directory: {self.repo_base_dir}")
-                shutil.rmtree(self.repo_base_dir)
+            if self.repos_dir and os.path.exists(self.repos_dir):
+                self.info(f"Cleaning up repository directory: {self.repos_dir}")
+                shutil.rmtree(self.repos_dir)
                 return True
         except Exception as e:
             return self.exception(e, f"Error during cleanup: {e}")
@@ -876,36 +872,30 @@ class NotebookSpecCompiler:
         try:
             if not self.requirements_files:
                 return self.warning("No requirements files found to compile")
-            
-            # Create a temporary combined requirements file
-            combined_req_file = self.output_dir / "combined_requirements.txt"
-            with open(combined_req_file, "w") as outfile:
-                for req_file in self.requirements_files:
-                    self.info(f"Adding requirements from {req_file}")
-                    with open(req_file, "r") as infile:
-                        outfile.write(f"# From {req_file}\n")
-                        outfile.write(infile.read())
-                        outfile.write("\n\n")
-            
+                        
             # Output file path for the compiled requirements
             compiled_req_file = self.output_dir / f"{self.image_name.replace(' ', '_')}_compiled_requirements.txt"
             
             # Run pip-compile to generate pinned requirements
-            self.info(f"Running pip-compile on combined requirements")
+            self.info(f"Running pip-compile on all requirements files.")
             try:
                 result = subprocess.run(
                     [
                         "pip-compile", 
+                        "-v",
                         "--output-file", str(compiled_req_file),
                         "--no-header",
                         "--no-emit-index-url",
+                        "--annotate",
                         "--allow-unsafe",
-                        str(combined_req_file)
-                    ],
-                    check=True,
+                    ] + list(self.requirements_files),
+                    check=False,
                     capture_output=True,
                     text=True,
                 )
+                if result.returncode != 0:
+                    return self.error(f"pip-compile failed:\n{result.stderr}")
+                
                 self.info(f"Successfully compiled requirements to {compiled_req_file}")
                 
                 # Read the compiled requirements and add them to the package list
@@ -913,13 +903,8 @@ class NotebookSpecCompiler:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith("#"):
-                            self.package_list.add(line)
-                
-                # Clean up the temporary combined file
-                os.remove(combined_req_file)
-                
+                            self.package_list.add(line)    
                 return True
-                
             except subprocess.CalledProcessError as e:
                 return self.error(f"pip-compile failed: {e.stderr}")
                 
@@ -929,10 +914,10 @@ class NotebookSpecCompiler:
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Process notebook image specification YAML and prepare notebook environment"
+        description="Process notebook image specification YAML and prepare notebook environment and tests."
     )
     parser.add_argument(
-        "spec_file", type=str, help="Path to the YAML specification file"
+        "spec_file", type=str, help="Path to the YAML specification file."
     )
     parser.add_argument(
         "--output-dir",
@@ -941,22 +926,33 @@ def parse_args():
         help="Directory to store output files",
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose output"
+        "--repos-dir",
+        type=str,
+        default="./notebook-repos",
+        help="Directory to store/locate cloned repos.",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable verbose output."
     )
     parser.add_argument(
         "--extract-imports",
         action="store_true",
-        help="Extract import statements from notebooks and save to separate files",
+        help="Extract import statements from notebooks and save to separate files.",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debugging with pdb on errors and preserve exception stack traces",
+        help="Enable debugging with pdb on errors and preserve exception stack traces.",
     )
     parser.add_argument(
         "--use-pip-compile",
         action="store_true",
-        help="Use pip-compile to generate pinned requirements",
+        help="Use pip-compile to generate pinned requirements.",
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Cleanup repo clones after processing.",
     )
     return parser.parse_args()
 
@@ -972,6 +968,8 @@ def main():
         extract_imports=args.extract_imports,
         debug=args.debug,
         use_pip_compile=args.use_pip_compile,
+        repos_dir=args.repos_dir,
+        cleanup=args.cleanup,
     )
 
     success = compiler.run()
