@@ -1,11 +1,11 @@
 #! env python
 
-"""This is the prototype of a notebook curation tool which enables a curator to 
+"""This is the prototype of a notebook curation tool which enables a curator to
 specify a set of notebooks and which will then be used as the basis for defining
-a conda environment inputs suitable for running all of them.  In addition to 
+a conda environment inputs suitable for running all of them.  In addition to
 defining a precise set of package versions to install,  it collects inputs for
 testinging the resulting environment and runners which execute the tests.  The
-long term goal of this tool is to provide inputs to build and test Jupyter 
+long term goal of this tool is to provide inputs to build and test Jupyter
 notebook Docker images in a CI/CD enabling curators to deploy science platform
 notebook images with minimal interaction with platform administrators.
 
@@ -16,11 +16,20 @@ To that end it has the following features:
 - Automaically clones the git repositories for the notebooks if a local clone
 does not already exist,  otherwise it updates the existing clones from their repos.
 
-- Searches for notebooks and package reuquirements.txt files in the specified 
+- Searches for notebooks and package reuquirements.txt files in the specified
 directories and subdirectories based on regular expressions.
 
+If --clone is specified,  it will clone or update the specified repositories
+depdending on whether they already exist or not.
+
+If --init-env is specified,  it will initialize the target environment with
+packages required by nb-curator and also register the environment as a local
+jupyterlab kernel.
+
 If --compile is specified,  it will create both a conda environment .yml file
-and a pip requirements.txt file suitable for running all of the notebooks.
+and a locked pip requirements.txt file based on compiling the requirements.txt
+The resulting environment should be suitable for running all the notebook files
+found in the repositories,  modulo the completeness of their requirememts.txt files.
 
 If --install is specified,  it will install the packages in the conda
 environment,  which XXXXX again at this time is the runtime environment.
@@ -36,7 +45,6 @@ If --cleanup is specified,  it will remove all cloned repositories.
 Generates a trivial conda environment .yml file based on the Python version
 specified by the curator spec.   XXXX Currently this .yml output is unused and
 package installation and testing occur relative to the curator runtime environment.
-
 """
 
 import argparse
@@ -54,16 +62,24 @@ import pdb  # Add import for the debugger
 import tempfile
 import datetime
 import glob
-
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Optional, Set
 
-
 from ruamel.yaml import YAML  # Replace standard yaml with ruamel.yaml
 
+# =========================================================================================
 
 NOTEBOOK_MAX_SECS = 30 * 60
+
+CURATOR_PACKAGES = """
+uv
+mamba
+papermill
+ipykernel
+""".strip().splitlines()
+
+# =========================================================================================
 
 
 class NotebookCurator:
@@ -89,13 +105,14 @@ class NotebookCurator:
         jobs: int = 1,
         timeout: int = 300,
         kernel="base",
+        init_env: bool = False,  # Add this parameter
+        clone: bool = False,
     ):
         """
         Initialize the notebook spec compiler.
 
         Args:
             spec_file: Path to the YAML specification file
-            
             output_dir: Directory to store output files
             repos_dir: Directory to store cloned repositories (persistent)
             verbose: Enable verbose output
@@ -103,6 +120,7 @@ class NotebookCurator:
             cleanup: Whether to clean up repository clones after execution
             compile: Whether to use pip-compile to generate pinned requirements
             no_simplify_paths: Whether to skip path simplification in annotated requirements
+            init_env: Whether to initialize the environment before processing
         """
         self.spec_file = spec_file
         self.python_program = python_program
@@ -122,6 +140,8 @@ class NotebookCurator:
         self.timeout = timeout
         self.kernel = kernel
         self.cleanup = cleanup
+        self.init_env = init_env  # Add this line
+        self.clone = clone
 
         # Set up logging
         logging.basicConfig(
@@ -201,7 +221,7 @@ class NotebookCurator:
         """
         msg = self._lformat(*args)
         self.exceptions.append(msg)
-        self.logger.error(msg, exc_info=True)
+        self.error("EXCEPTION: ", msg)
         if self.debug_mode:
             print(f"\n*** DEBUG MODE: Exception caught: {msg} ***")
             print(
@@ -226,8 +246,14 @@ class NotebookCurator:
         print(f"Errors: {len(self.errors)}")
         print(f"Warnings: {len(self.warnings)}")
 
-    def python_version(self):
-        return self.spec["image_spec_header"]["python_version"]
+    @property
+    def requested_python_version(self):
+        version = self.spec["image_spec_header"]["python_version"]
+        if not isinstance(version, str):
+            raise ValueError(
+                "Invalid python_version in spec file,  must be a YAML string of form 'x', 'x.y', or 'x.y.z'."
+            )
+        return list(map(int, version.split(".")))
 
     def main(self) -> bool:
         """
@@ -245,12 +271,20 @@ class NotebookCurator:
         Returns:
             bool: True if requested actions were successful, False otherwise
         """
+        # Initialize environment if requested
+        if self.init_env:
+            if not self.initialize_environment():
+                return False
+
         # Load the spec file
         if not self.load_spec():
             return False
 
         # Validate the spec
         if not self.validate_spec():
+            return False
+
+        if not self.check_python_version():
             return False
 
         # Clone or use local repositories
@@ -261,14 +295,14 @@ class NotebookCurator:
         notebook_paths = self.collect_notebook_paths()
         if not notebook_paths:
             return False
-        
+
         test_imports = self.extract_imports(notebook_paths)
         if not test_imports:
             return False
 
         # Find requirements files
         repo_requirements_files = self.find_requirements_files(notebook_paths)
-        if not repo_requirements_files:   
+        if not repo_requirements_files:
             return False
 
         # Compile package versions if requested
@@ -284,11 +318,13 @@ class NotebookCurator:
             conda_spec = self.spec["out"]["conda_spec"]
             package_versions = self.spec["out"]["package_versions"]
 
-        if (self.revise_spec_file and not
-            self.revise_spec(
-                package_versions, sorted(notebook_paths), sorted(test_imports.keys()), conda_spec
-                )):
-                return False
+        if self.revise_spec_file and not self.revise_spec(
+            package_versions,
+            sorted(notebook_paths),
+            sorted(test_imports.keys()),
+            conda_spec,
+        ):
+            return False
 
         # Install packages if requested
         if self.install:
@@ -505,7 +541,7 @@ class NotebookCurator:
         Get the path to a local repository.
         """
         # Remove the file:// prefix and expand user directory if needed
-        local_path = repo_url[7:]  # Remove "file://"
+        local_path = repo_url[repo_url.index("//") + 2 :]  # Remove "file://"
         return Path(os.path.expanduser(local_path))
 
     def setup_repositories(self) -> bool:
@@ -555,7 +591,17 @@ class NotebookCurator:
         """
         repo_name = repo_url.split("/")[-1].replace(".git", "")
         repo_dir = self.repos_dir / repo_name
-        try:
+        if not self.clone:
+            if repo_dir.exists():
+                self.info(
+                    f"No cloning requested and {repo_dir} exists.  Skipping clone/update."
+                )
+                return repo_dir
+            else:
+                raise RuntimeError(
+                    f"No cloning requested and no clone exists at directory {repo_dir}."
+                )
+        try:  # clone or update
             if repo_dir.exists():
                 # Repository already exists, try to update it
                 self.info(
@@ -626,7 +672,9 @@ class NotebookCurator:
                 self._process_directory_entry(entry, repo_dir, root_nb_directory)
             )
 
-        self.info("Found", len(notebook_paths), "notebooks:", "\n"+"\n".join(notebook_paths))
+        self.info(
+            "Found", len(notebook_paths), "notebooks:", "\n" + "\n".join(notebook_paths)
+        )
         return notebook_paths
 
     def _process_directory_entry(
@@ -699,10 +747,7 @@ class NotebookCurator:
                     if imp not in import_to_nb:
                         import_to_nb[imp] = []
                     import_to_nb[imp].append(nb_path_str)
-            self.info(
-                f"Extracted {len(imports)} imports:",
-                "\n" + "\n".join(imports)
-            )
+            self.info(f"Extracted {len(imports)} imports:", "\n" + "\n".join(imports))
             return import_to_nb
         except Exception as e:
             self.exception(e, f"Error extracting imports from notebooks: {e}")
@@ -821,8 +866,10 @@ class NotebookCurator:
             if req_file.exists():
                 requirements_files.append(req_file)
                 self.debug(f"Found requirements file: {req_file}")
-        self.info(f"Found {len(requirements_files)} requirements.txt files:",
-                "\n" + "\n".join(str(file) for file in requirements_files))
+        self.info(
+            f"Found {len(requirements_files)} requirements.txt files:",
+            "\n" + "\n".join(str(file) for file in requirements_files),
+        )
         return requirements_files
 
     def combine_requirements(self, requirements_files) -> bool:
@@ -883,7 +930,7 @@ class NotebookCurator:
     def filter_notebook_list(self, notebook_paths) -> list[str] | bool:
         """
         Generate a list of included notebooks.
-       """
+        """
         try:
             # Use a set to eliminate duplicates
             unique_notebooks = set()
@@ -914,13 +961,15 @@ class NotebookCurator:
         except Exception as e:
             return self.exception(e, f"Error during cleanup: {e}")
 
-    def revise_spec(self, package_versions, test_notebooks, test_imports, conda_spec) -> bool:
+    def revise_spec(
+        self, package_versions, test_notebooks, test_imports, conda_spec
+    ) -> bool:
         shutil.copy(self.spec_file, self.spec_file + ".bak")
         try:
             self.info(f"Revising spec file {self.spec_file} with program outputs.")
             if "out" not in self.spec:
                 self.spec["out"] = dict()
-            self.spec["out"]["conda_spec"] = conda_spec       
+            self.spec["out"]["conda_spec"] = conda_spec
             self.spec["out"]["package_versions"] = package_versions or []
             self.spec["out"]["test_notebooks"] = [str(p) for p in test_notebooks] or []
             self.spec["out"]["test_imports"] = test_imports or []
@@ -970,8 +1019,10 @@ class NotebookCurator:
             output = self.run_uv_compile(self.compile_out_file, requirements_files)
 
             if output is False:
-                self.error("========== Failed compiling requirements ==========\n",
-                    self.annotated_requirements(requirements_files))
+                self.error(
+                    "========== Failed compiling requirements ==========",
+                    "\n" + self.annotated_requirements(requirements_files),
+                )
                 return False
 
             # Read the compiled requirements and add them to the package list
@@ -981,8 +1032,10 @@ class NotebookCurator:
                     line = line.strip()
                     if line and not line.startswith("#"):
                         package_versions.append(line)
-            self.info(f"Resolved requirements to {len(package_versions)} package versions:" +
-                    "\n" + "\n".join(package_versions))
+            self.info(
+                f"Resolved requirements to {len(package_versions)} package versions:",
+                "\n" + "\n".join(package_versions),
+            )
             return package_versions
         except Exception as exc:
             return self.exception(exc, "Failed compiling requirements.")
@@ -1001,7 +1054,9 @@ class NotebookCurator:
             result = zip(pkgs, paths)
         return "\n".join(f"{pkg:<20}  : {path:<55}" for pkg, path in result)
 
-    def run_uv_compile(self, compiled_req_file: str, requirements_files: list[str]) -> str:
+    def run_uv_compile(
+        self, compiled_req_file: str, requirements_files: list[str]
+    ) -> str:
         cmd = [
             "uv",
             "pip",
@@ -1067,15 +1122,17 @@ class NotebookCurator:
         except Exception as e:
             return self.exception(e, f"Error installing packages: {e}")
 
-    def test_notebooks(self, notebook_paths: list[str|Path]) -> bool:
+    def test_notebooks(self, notebook_paths: list[str | Path]) -> bool:
         """
         Test the installed packages by running all notebooks which match the
         specified regexes or all notebooks if no regexes are specified.
         """
         # notebooks = [str(path) for path in notebook_paths]
-        failing = test_notebooks(notebook_paths, kernel=self.kernel, jobs=self.jobs, timeout=self.timeout)
+        failing = test_notebooks(
+            notebook_paths, kernel=self.kernel, jobs=self.jobs, timeout=self.timeout
+        )
         if failing:
-            print(divider(f"FAILED"))
+            print(divider("FAILED"))
             for notebook in failing:
                 self.error(f"Notebook {notebook} failed tests")
         else:
@@ -1097,13 +1154,59 @@ class NotebookCurator:
                 self.info("Importing", pkg, "... ok")
             except Exception:
                 traceback.print_exc()
-                self.error("FAIL import", pkg, "by notebook", import_map.get(pkg, "unknown"))
+                self.error(
+                    "FAIL import", pkg, "by notebook", import_map.get(pkg, "unknown")
+                )
                 errs.append(pkg)
         if errs:
             self.error(f"Failed to import {len(errs)} packages:", errs)
             return False
         else:
             return self.info("All imports succeeded.")
+
+    def initialize_environment(self) -> bool:
+        """
+        Initialize the environment for notebook processing.
+
+        This is a stub method that can be implemented to set up the environment
+        before processing notebooks (e.g., creating virtual environments,
+        installing base dependencies, etc.).
+
+        Returns:
+            bool: True if initialization was successful, False otherwise
+        """
+        self.info("Initializing environment...")
+        output = self.run(["pip", "install"] + CURATOR_PACKAGES)
+        if not output:
+            return self.error(
+                "Installing curator pacakges in target environment failed: {output}"
+            )
+        output = self.run(
+            f"python -m ipykernel install --user --name {self.init_env}".split()
+        )
+        if not output:
+            return self.error(
+                "Registering JupyterLab kernel for target environment failed: {output}"
+            )
+        # TODO: Implement environment initialization logic here
+        self.info("Environment initialization completed successfully")
+        return True
+
+    def check_python_version(self) -> bool:
+        """
+        Check if the install environment Python version was requested.
+        """
+        self.info("Checking Python version...")
+        output = self.run(["python", "--version"])
+        system_version = list(map(int, output.strip().split()[-1].split(".")))
+        requested_version = self.requested_python_version
+        for i, version in enumerate(requested_version):
+            if version != system_version[i]:
+                return self.error(
+                    f"The working environment is running Python {system_version} but "
+                    f"Python {requested_version} is requested in the specification."
+                )
+        return True
 
 
 # -------------------------------------------------------------------------------
@@ -1117,13 +1220,17 @@ def test_notebooks(notebooks, kernel="base", jobs=1, timeout=NOTEBOOK_MAX_SECS):
 
     Return   count of failed notebooks
     """
-    print(divider(f"Testing {len(notebooks)} notebooks on kernel {kernel}  using {jobs} jobs").strip())
+    print(
+        divider(
+            f"Testing {len(notebooks)} notebooks on kernel {kernel}  using {jobs} jobs"
+        ).strip()
+    )
     failing_notebooks = []
     with ProcessPoolExecutor(max_workers=jobs) as e:
         for failed, notebook, output in e.map(
             test_notebook,
             notebooks,
-            ["base"]*len(notebooks),
+            ["base"] * len(notebooks),
             [timeout] * len(notebooks),
         ):
             sys.stdout.write(output)
@@ -1248,6 +1355,18 @@ def parse_args():
         help="Directory to store/locate cloned repos.",
     )
     parser.add_argument(
+        "--clone",
+        action="store_true",
+        help="If set, clone or update notebook repos at --repos-dir.",
+    )
+    parser.add_argument(
+        "--init-env",
+        default=None,
+        const="base",
+        nargs="?",
+        help="Initialize the environment before processing notebooks.  Target env should already be active.",
+    )
+    parser.add_argument(
         "-c",
         "--compile",
         action="store_true",
@@ -1324,6 +1443,8 @@ def main():
         cleanup=args.cleanup,
         no_simplify_paths=args.no_simplify_paths,
         python_program=sys.executable,
+        init_env=args.init_env,  # Add this line
+        clone=args.clone,
     )
 
     success = compiler.main()
