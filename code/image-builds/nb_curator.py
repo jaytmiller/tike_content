@@ -743,11 +743,12 @@ class NotebookCurator:
             for nb_path_str in unique_notebooks:
                 nb_dict = self._read_notebook_json(nb_path_str)
                 imports = self._extract_imports_from_notebook(nb_dict)
+                self.debug(f"Extracted {imports} imports from {nb_path_str}")
                 for imp in imports:
                     if imp not in import_to_nb:
                         import_to_nb[imp] = []
                     import_to_nb[imp].append(nb_path_str)
-            self.info(f"Extracted {len(imports)} imports:", "\n" + "\n".join(imports))
+            self.info(f"Extracted {len(import_to_nb)} imports:", "\n" + "\n".join(import_to_nb.keys()))
             return import_to_nb
         except Exception as e:
             self.exception(e, f"Error extracting imports from notebooks: {e}")
